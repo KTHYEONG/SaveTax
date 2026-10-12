@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AI Agent Workspaces & Ephemeral
+scratch/
+tmp/
+docs/specs/
+.serena/
+
