@@ -981,3 +981,511 @@ def test_verification_failure_preserves_progress_and_stops_correctly(
         assert not any("222222222_0000000001" in url for url in calls)
         assert "자료 접근 대기" in caplog.text
     assert not (out_dir / "batch-0001.jsonl").exists()
+
+
+def _evidence_rows() -> list[dict[str, Any]]:
+    return [
+        _base_row(
+            listing_id="111111111_0000000001",
+            item_id="11111111",
+            price=2760000,
+            dlv_key=1,
+            dlv_lines=1,
+            dlv_qty=2,
+            dlv_unit="대",
+            dlv_amount=5520000,
+        ),
+        _base_row(
+            listing_id="222222222_0000000001",
+            item_id="11111111",
+            price=2508000,
+            contract_begin="2025-01-01",
+            contract_end="2026-12-31",
+            vendor_name="다른업체",
+            dlv_key=None,
+            dlv_lines=None,
+            dlv_qty=None,
+            dlv_unit=None,
+            dlv_amount=None,
+            dlv_first_date=None,
+            dlv_last_date=None,
+        ),
+    ]
+
+
+def _evidence_fact(state: str = "available") -> dict:
+    return {
+        "fact_id": "F1",
+        "listing_id": "111111111_0000000001",
+        "contract_no": "111111111_0",
+        "request_no": "R1",
+        "line_no": "1",
+        "request_date": "2025-10-12",
+        "unit": "대",
+        "tax_basis": "vat_included",
+        "basis_id": "basis:대:vat_included",
+        "period_kind": "none",
+        "unit_price_krw": "2760000",
+        "quantity": "2",
+        "comparable_amount_krw": "5520000",
+        "scorable": True,
+        "exclusion_reasons": [],
+    }
+
+
+def _evidence_item_body(item_id: str = "11111111", state: str = "available") -> dict:
+    return {
+        "item_id": item_id,
+        "availability": {"state": state},
+        "snapshot": {
+            "name": "물탱크",
+            "model": "T",
+            "manufacturer": "M",
+            "category": "C",
+            "source_release": "rtest",
+            "facts_total": 1,
+            "facts_truncated": False,
+        },
+        "facts": [_evidence_fact()],
+    }
+
+
+def _evidence_listing_body(listing_id: str, contract_no: str, price: str, terms: str = "서울", region: str = "서울") -> dict:
+    return {
+        "data": {
+            "id": listing_id,
+            "itemId": "11111111",
+            "unit": "대",
+            "price": price,
+            "priceKind": "contract",
+            "deliveryTerms": terms,
+            "supplyRegion": region,
+            "vendor": {"name": "v"},
+            "contract": {"no": contract_no, "beginYmd": "20250101", "endYmd": "20261231"},
+        },
+        "meta": {"release": "rtest"},
+    }
+
+
+_PAGE_HTML = (
+    "<html><body>단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+    "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P "
+    "납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음</body></html>"
+)
+
+
+def _evidence_transport(calls: list, *, item_state: str = "available", fail: str | None = None) -> Any:
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "release-live-20261012",
+                    "ruleset_version": "rules-v1",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "catalog",
+                },
+            )
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            if fail == "lookup_network":
+                raise OSError("dns fail")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": item_state} for i in ids]})
+        if "/events/current/items/" in url and "/lookup" not in url:
+            item_id = url.rsplit("/", 1)[-1]
+            if fail == "item_api" and item_id == "11111111":
+                return _resp(403, {"code": "FORBIDDEN", "message": "m", "request_id": "r", "retryable": False})
+            if fail == "item_network":
+                raise OSError("dns fail")
+            return _resp(200, _evidence_item_body(item_id, item_state))
+        if "/listings/111111111_0000000001" in url:
+            return _resp(200, _evidence_listing_body("111111111_0000000001", "111111111_0", "2760000"))
+        if "/listings/222222222_0000000001" in url:
+            return _resp(200, _evidence_listing_body("222222222_0000000001", "222222222_0", "2508000"))
+        if "savetax.now/listing/" in url:
+            if fail == "page_403":
+                return HttpResponse(status=403, headers={}, body=b"", elapsed_seconds=0.01)
+            return HttpResponse(status=200, headers={}, body=_PAGE_HTML.encode(), elapsed_seconds=0.01)
+        raise AssertionError(f"unexpected url {url}")
+
+    return transport
+
+
+def test_evidence_writes_bundles_and_drafts(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    out_dir = tmp_path / "ev"
+    calls: list = []
+    code = main(
+        ["evidence", "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport(calls),
+    )
+    assert code == 0
+    lines = (out_dir / "cross-bundles.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    draft = json.loads((out_dir / "drafts" / "11111111.json").read_text(encoding="utf-8"))
+    assert draft["canonical_product_id"] == "11111111"
+
+
+def test_evidence_claimed_skipped_before_detail(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport(calls, item_state="claimed"),
+    )
+    assert code == 0
+    assert not any("/events/current/items/11111111" in u for u in calls if "/lookup" not in u)
+    assert not (tmp_path / "ev" / "drafts" / "11111111.json").exists()
+
+
+def test_evidence_limit_bounds_detail_calls(tmp_path: Path) -> None:
+    rows: list[dict[str, Any]] = []
+    for i in range(3):
+        item = f"1111111{i}"
+        rows.append(_base_row(item_id=item, listing_id=f"11111111{i}_0000000001", dlv_key=10 + i, dlv_amount=5520000, dlv_qty=2, price=2760000))
+        rows.append(
+            _base_row(
+                listing_id=f"22222222{i}_0000000001",
+                item_id=item,
+                price=2508000,
+                vendor_name="다른업체",
+                dlv_key=None,
+                dlv_lines=None,
+                dlv_qty=None,
+                dlv_unit=None,
+                dlv_amount=None,
+                dlv_first_date=None,
+                dlv_last_date=None,
+            )
+        )
+    data_dir = _write_dataset(tmp_path, rows)
+    calls: list = []
+
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "r",
+                    "ruleset_version": "v",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "c",
+                },
+            )
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": "available"} for i in ids]})
+        if "/events/current/items/" in url:
+            item_id = url.rsplit("/", 1)[-1]
+            body = _evidence_item_body(item_id)
+            body["facts"][0]["contract_no"] = "111111111"
+            return _resp(200, body)
+        if "/listings/" in url:
+            lid = url.rsplit("/", 1)[-1]
+            if lid.startswith("11111111"):
+                return _resp(200, {
+                    "data": {"id": lid, "itemId": lid[:8] if False else "x", "unit": "대", "price": "2760000",
+                             "priceKind": "contract", "deliveryTerms": "서울", "supplyRegion": "서울",
+                             "vendor": {"name": "v"}, "contract": {"no": "111111111", "beginYmd": "20250101", "endYmd": "20261231"}},
+                    "meta": {"release": "rtest"},
+                })
+            return _resp(200, {
+                "data": {"id": lid, "itemId": "x", "unit": "대", "price": "2508000",
+                         "priceKind": "contract", "deliveryTerms": "서울", "supplyRegion": "서울",
+                         "vendor": {"name": "v"}, "contract": {"no": "222222222", "beginYmd": "20250101", "endYmd": "20261231"}},
+                "meta": {"release": "rtest"},
+            })
+        if "savetax.now/listing/" in url:
+            return HttpResponse(status=200, headers={}, body=_PAGE_HTML.encode(), elapsed_seconds=0.01)
+        raise AssertionError(url)
+
+    code = main(
+        ["evidence", "--limit", "1", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=transport,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    item_calls = [u for u in calls if "/events/current/items/" in u and "/lookup" not in u]
+    assert len(item_calls) == 1
+
+
+def test_evidence_items_filter_restricts_run(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--items", "11111111", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport(calls),
+    )
+    assert code == 0
+    assert any("ids=11111111" in u for u in calls if "/lookup" in u)
+
+
+def test_evidence_api_error_on_one_item_continues(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport(calls, fail="item_api"),
+    )
+    assert code == 0
+
+
+def test_evidence_network_failure_pauses_with_partial_output(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport(calls, fail="item_network"),
+    )
+    assert code == 3
+    assert (tmp_path / "ev" / "cross-bundles.jsonl").exists()
+
+
+def test_evidence_invalid_limit_rejected(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    assert (
+        main(
+            ["evidence", "--limit", "0", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+            environ={"SAVETAX_TOKEN": TOKEN},
+            transport=_evidence_transport([]),
+        )
+        == 2
+    )
+
+
+def test_evidence_retail_lane_refused(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    assert (
+        main(
+            ["evidence", "--lane", "retail", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+            environ={"SAVETAX_TOKEN": TOKEN},
+            transport=_evidence_transport([]),
+        )
+        == 2
+    )
+
+
+def test_evidence_only_get_requests(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport(calls),
+    )
+    assert code == 0
+    assert not any("submissions" in u or "reports" in u for u in calls)
+
+
+def test_evidence_no_candidates_writes_empty(tmp_path: Path) -> None:
+    rows = [
+        _base_row(
+            listing_id="111111111_0000000001",
+            dlv_key=None,
+            dlv_lines=None,
+            dlv_qty=None,
+            dlv_unit=None,
+            dlv_amount=None,
+            dlv_first_date=None,
+            dlv_last_date=None,
+        )
+    ]
+    data_dir = _write_dataset(tmp_path, rows)
+    out_dir = tmp_path / "ev"
+    code = main(
+        ["evidence", "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport([]),
+    )
+    assert code == 0
+    assert (out_dir / "cross-bundles.jsonl").exists()
+
+
+def test_evidence_review_bundle_needs_flag(tmp_path: Path, monkeypatch: Any) -> None:
+    import src.savetax.cli as cli_mod
+    from src.savetax.evidence import EvidenceBundle, Lane
+
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+
+    def fake_bundle(*_a: Any, **_k: Any) -> EvidenceBundle:
+        import datetime as _dt
+        from datetime import date as _date
+        from decimal import Decimal as _Decimal
+
+        from src.savetax.evidence import LineProposal, PriceEvidence
+
+        proof = PriceEvidence(
+            source_url="https://savetax.now/listing/222222222_0000000001",
+            quote="물품식별번호 11111111 / savetax.now 등재 화면, 2026-10-13 확인",
+            observed_price_krw=2508000,
+            observed_at=_date(2026, 10, 13),
+            vat_included=True,
+            shipping_included=True,
+        )
+        line = LineProposal(
+            fact_id="F1",
+            benchmark_unit_price_krw=_Decimal("2508000"),
+            comparison_basis_id="basis:대:vat_included",
+            unit="대",
+            tax_basis="vat_included",
+            fact_unit_price_krw=_Decimal("2760000"),
+            quantity=_Decimal("2"),
+            comparable_amount_krw=_Decimal("5520000"),
+            request_date=_date(2025, 10, 12),
+            expected_krw=504000,
+            price_evidence=(proof,),
+        )
+        return EvidenceBundle(
+            item_id="11111111",
+            lane=Lane.CROSS_CONTRACT,
+            title="같은 물품의 다른 계약 단가 대비 1.10배",
+            claim="청구",
+            comparison_scope="범위",
+            reproduction_notes="재현",
+            lines=(line,),
+            rejected=(),
+            caveats=(),
+            review_required=True,
+            generated_at=_dt.datetime(2026, 10, 13, tzinfo=_dt.UTC),
+        )
+
+    monkeypatch.setattr(cli_mod, "build_cross_bundle", fake_bundle)
+    out_plain = tmp_path / "ev-plain"
+    code = main(
+        ["evidence", "--out-dir", str(out_plain), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport([]),
+    )
+    assert code == 0
+    assert not (out_plain / "drafts" / "11111111.json").exists()
+    out_flag = tmp_path / "ev-flag"
+    code2 = main(
+        ["evidence", "--out-dir", str(out_flag), "--data-dir", str(data_dir), "--include-review"],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport([]),
+    )
+    assert code2 == 0
+    assert (out_flag / "drafts" / "11111111.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["api", "network", "pending"])
+def test_evidence_preserves_first_bundle_and_handles_second_item(tmp_path: Path, failure: str, caplog: Any) -> None:
+    from src.savetax.errors import DataAccessPending
+
+    rows = []
+    listing_info = {}
+    for i in range(3):
+        item = str(11111111 + i)
+        order_id = f"11111111{i}_0000000001"
+        benchmark_id = f"22222222{i}_0000000001"
+        for row, lid in zip(_evidence_rows(), (order_id, benchmark_id), strict=True):
+            row.update(item_id=item, listing_id=lid)
+            if row["dlv_key"] is not None:
+                row["dlv_key"] = i + 1
+            rows.append(row)
+            listing_info[lid] = (item, str(row["price"]))
+    data_dir = _write_dataset(tmp_path, rows)
+    calls: list[str] = []
+    fallback = _evidence_transport([])
+
+    def transport(url: str, headers: Any, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if "/items/lookup" in url:
+            return _resp(200, _lookup_body(url.split("ids=")[1].split(",")))
+        if "/events/current/items/" in url:
+            item = url.rsplit("/", 1)[-1]
+            if item == "11111112":
+                if failure == "api":
+                    return _resp(403, {"code": "FORBIDDEN", "message": "denied", "retryable": False})
+                if failure == "pending":
+                    raise DataAccessPending("[DATA] facts pending: 자료 접근 대기")
+                raise socket.gaierror("unreachable")
+            body = _evidence_item_body(item)
+            lid = next(l for l, (pid, _) in listing_info.items() if pid == item and l.startswith("111"))
+            body["facts"][0].update(listing_id=lid, contract_no=lid[:11])
+            return _resp(200, body)
+        if "/listings/" in url:
+            lid = url.rsplit("/", 1)[-1]
+            item, price = listing_info[lid]
+            body = _evidence_listing_body(lid, lid[:11], price)
+            body["data"]["itemId"] = item
+            return _resp(200, body)
+        if "https://savetax.now/listing/" in url:
+            assert "Authorization" not in headers
+            lid = url.rsplit("/", 1)[-1]
+            item, _ = listing_info[lid]
+            html = _PAGE_HTML.replace("11111111", item).replace("222222222_0000000001", lid)
+            return _resp(200, html.encode())
+        return fallback(url, headers, timeout)
+
+    out = tmp_path / "evidence"
+    with caplog.at_level("INFO"):
+        code = main(["evidence", "--data-dir", str(data_dir), "--out-dir", str(out)],
+                    environ={"SAVETAX_TOKEN": TOKEN}, transport=transport)
+    bundles = [json.loads(line) for line in (out / "cross-bundles.jsonl").read_text().splitlines()]
+    assert bundles[0]["item_id"] == "11111111"
+    assert (out / "drafts" / "11111111.json").is_file()
+    assert calls.count("https://hackathon.savetax.now/v1/events/current") == 1
+    assert "[EVIDENCE] lane=cross" in caplog.text
+    if failure == "api":
+        assert code == 0
+        assert [b["item_id"] for b in bundles] == ["11111111", "11111113"]
+        assert (out / "drafts" / "11111113.json").is_file()
+        assert "skipped=api_error:FORBIDDEN" in caplog.text
+    else:
+        assert code == 3
+        assert len(bundles) == 1
+        assert not any(u.endswith("/items/11111113") for u in calls)
+        assert "자료 접근 대기" in caplog.text
+
+
+def test_evidence_all_lane_is_not_silently_partial() -> None:
+    assert main(["evidence", "--lane", "all"], environ={}, transport=_evidence_transport([])) == 2
+
+
+@pytest.mark.parametrize("options", [["--limit", "1"], ["--items", "11111113"]])
+def test_evidence_selection_from_multiple_real_candidates(tmp_path: Path, options: list[str]) -> None:
+    rows = []
+    for i in range(3):
+        for row, prefix in zip(_evidence_rows(), ("11111111", "22222222"), strict=True):
+            row.update(item_id=str(11111111 + i), listing_id=f"{prefix}{i}_0000000001")
+            if row["dlv_key"] is not None:
+                row["dlv_key"] = i + 1
+            rows.append(row)
+    data_dir = _write_dataset(tmp_path, rows)
+    looked_up: list[str] = []
+    detailed: list[str] = []
+    fallback = _evidence_transport([])
+
+    def transport(url: str, headers: Any, timeout: float) -> HttpResponse:
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            looked_up.extend(ids)
+            return _resp(200, _lookup_body(ids))
+        if "/events/current/items/" in url:
+            item = url.rsplit("/", 1)[-1]
+            detailed.append(item)
+            return _resp(200, {"item_id": item, "availability": {"state": "claimed"}, "snapshot": None, "facts": []})
+        return fallback(url, headers, timeout)
+
+    assert main(["evidence", "--data-dir", str(data_dir), "--out-dir", str(tmp_path / "out"), *options],
+                environ={"SAVETAX_TOKEN": TOKEN}, transport=transport) == 0
+    if options[0] == "--items":
+        assert looked_up == ["11111113"]
+        assert detailed == ["11111113"]
+    else:
+        assert looked_up == ["11111111", "11111112", "11111113"]
+        assert detailed == ["11111111"]
