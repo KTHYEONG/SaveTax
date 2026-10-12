@@ -16,6 +16,7 @@
 - **PAT Isolation Boundary:** Participant Personal Access Tokens (PAT) are strictly confined to:
   1. Protected SaveTax API (`api.savetax.now`) via `Authorization: Bearer <PAT>` header.
   2. The single official product ZIP URL (`https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip`) via `Authorization: Bearer <PAT>` header.
+  3. The official SaveTax MCP (`https://mcp.savetax.now/mcp`) via `Authorization: Bearer <PAT>` header, registered with `claude mcp add --scope local` so the token never lands in repository files (`.mcp.json` must not carry it).
 - **Prohibited Leakage Vectors:** NEVER pass PAT to:
   - Public manifest or documentation URLs (`hackathon.savetax.now`).
   - Arbitrary `workers.dev` endpoints outside the single official ZIP URL.

@@ -5,7 +5,7 @@
 ## 1. Domain Ground Truth & Hard Boundaries
 - **Objective & Integrity:** Detect and report excessively inflated public procurement goods (세금 낭비/과다 집행 품목) with verified empirical market price evidence. Never fabricate, extrapolate, or cosmetically embellish candidates. If data is inaccessible, mark as `자료 접근 대기`.
 - **Absolute Credential Protection (PAT Invariant):**
-  - The participant PAT must ONLY be transmitted via `Authorization: Bearer <PAT>` to protected SaveTax APIs (`api.savetax.now`) and the official ZIP URL (`https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip`).
+  - The participant PAT must ONLY be transmitted via `Authorization: Bearer <PAT>` to protected SaveTax APIs (`api.savetax.now`), the official SaveTax MCP (`https://mcp.savetax.now/mcp`, registered via `claude mcp add --scope local --header`, never in repo files), and the official ZIP URL (`https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip`).
   - NEVER output, log, hardcode, commit, or pass PAT via URL query parameters, CLI logs, seeds, queries, or public manifest requests.
 - **REST & Dataset Driven Discovery:** Explore procurement data exclusively via REST APIs and official datasets (DuckDB/Parquet/ZIP). Never use browser automation, Chrome, or generic web searches for catalog discovery.
 - **Network Diagnostic Rigor:** Separate connection failures across DNS, TCP/TLS, and HTTP stages. Distinguish local sandbox restrictions (`Operation not permitted`, socket rejections) from server outages. Never assume a host is down before reaching the HTTP layer.
