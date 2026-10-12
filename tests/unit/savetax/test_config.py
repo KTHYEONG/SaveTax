@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.savetax.config import AuditConfig, SaveTaxConfig, Secret, load_token
+from src.savetax.config import AuditConfig, EvidenceConfig, SaveTaxConfig, Secret, ShopSpec, load_token
 from src.savetax.errors import ConfigError, CredentialError
 
 
@@ -186,3 +186,74 @@ def test_empty_first_dotenv_key_does_not_fall_through(tmp_path: Path) -> None:
 def test_unreadable_dotenv_is_a_credential_error(tmp_path: Path) -> None:
     with pytest.raises(CredentialError, match="dotenv"):
         load_token(SaveTaxConfig(dotenv_path=tmp_path), {})
+
+
+def _evidence(**over: object) -> EvidenceConfig:
+    return EvidenceConfig(**over)  # type: ignore[arg-type]
+
+
+def test_evidence_defaults_are_valid() -> None:
+    cfg = EvidenceConfig()
+    assert cfg.cross_markup_threshold == Decimal("1.10")
+    assert cfg.min_item_expected_krw == 300000
+    hosts = cfg.public_hosts()
+    for host in ("savetax.now", "prod.danawa.com", "search.danawa.com", "itncctv.kr"):
+        assert host in hosts
+
+
+def test_evidence_threshold_below_one_is_rejected() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(cross_markup_threshold=Decimal("0.99"))
+
+
+def test_evidence_template_without_placeholder_is_rejected() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(listing_page_url_template="https://savetax.now/listing/")
+
+
+def test_evidence_plain_http_template_is_rejected() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(danawa_search_url_template="http://search.danawa.com/?query={query}")
+
+
+def test_evidence_credential_host_cannot_be_a_public_host() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(listing_page_url_template="https://api.savetax.now/v1/listings/{listing_id}")
+
+
+def test_evidence_unknown_shop_platform_is_rejected() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(shops=(ShopSpec("a.example", "shopify"),))
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"cross_markup_threshold": Decimal("NaN")},
+        {"retail_markup_threshold": Decimal("0.5")},
+        {"install_allowance_rate": Decimal("-0.01")},
+        {"min_offer_count": 0},
+        {"outlier_ratio": Decimal("0.9")},
+        {"single_offer_stability_ratio": Decimal("0.9")},
+        {"oem_gap_cap": Decimal("0.9")},
+        {"min_item_expected_krw": -1},
+        {"max_benchmarks_per_item": 0},
+        {"max_lines_per_draft": 0},
+        {"max_draft_bytes": 0},
+        {"listing_page_url_template": "https:///{listing_id}"},
+        {"shops": (ShopSpec("API.SAVETAX.NOW", "cafe24"),)},
+        {"shops": (ShopSpec("api.savetax.now.", "cafe24"),)},
+        {"shops": (ShopSpec("user@store.example", "cafe24"),)},
+        {"shops": (ShopSpec("store.example:443", "cafe24"),)},
+        {"public_request_interval_seconds": -0.5},
+        {"danawa_product_url_template": "https://prod.danawa.com/info/"},
+        {"danawa_history_url_template": "http://prod.danawa.com/info/ajax/getProductPriceList.ajax.php?productCode={pcode}"},
+        {"shops": (ShopSpec("", "cafe24"),)},
+        {"shops": (ShopSpec("a/b.example", "cafe24"),)},
+        {"shops": (ShopSpec("x.workers.dev", "cafe24"),)},
+        {"listing_page_url_template": "https://hackathon.savetax.now/v1/listings/{listing_id}"},
+    ],
+)
+def test_evidence_invalid_configuration_fails_closed(kw: object) -> None:
+    with pytest.raises(ConfigError):
+        _evidence(**kw)  # type: ignore[arg-type]

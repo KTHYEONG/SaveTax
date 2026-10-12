@@ -20,7 +20,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["AuditConfig", "SaveTaxConfig", "Secret", "load_token"]
+__all__ = ["AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "load_token"]
 
 
 class Secret:
@@ -218,3 +218,191 @@ def load_token(config: SaveTaxConfig, environ: Mapping[str, str]) -> Secret:
             raise CredentialError("[SYS] invalid participant token (source: dotenv)")
         return Secret(candidate)
     raise CredentialError("[SYS] missing participant token (source: env/dotenv)")
+
+
+@dataclass(frozen=True)
+class ShopSpec:
+    """One retail shop searchable by model: host and storefront platform ("cafe24" or "godomall")."""
+
+    host: str
+    platform: str
+
+
+_TEMPLATE_PLACEHOLDERS: tuple[tuple[str, str], ...] = (
+    ("listing_page_url_template", "{listing_id}"),
+    ("danawa_search_url_template", "{query}"),
+    ("danawa_product_url_template", "{pcode}"),
+    ("danawa_history_url_template", "{pcode}"),
+)
+
+_CREDENTIAL_HOSTS = frozenset({"hackathon.savetax.now", "api.savetax.now"})
+
+
+@dataclass(frozen=True)
+class EvidenceConfig:
+    """Thresholds, public hosts and output paths for evidence collection."""
+
+    evidence_dir: Path = Path("scratch/evidence")
+    listing_page_url_template: str = "https://savetax.now/listing/{listing_id}"
+    danawa_search_url_template: str = "https://search.danawa.com/?query={query}"
+    danawa_product_url_template: str = "https://prod.danawa.com/info/?pcode={pcode}"
+    danawa_history_url_template: str = (
+        "https://prod.danawa.com/info/ajax/getProductPriceList.ajax.php?productCode={pcode}"
+    )
+    public_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    )
+    public_request_interval_seconds: float = 1.0
+    shops: tuple[ShopSpec, ...] = (
+        ShopSpec("itncctv.kr", "cafe24"),
+        ShopSpec("rftown.com", "cafe24"),
+        ShopSpec("fibermart.co.kr", "cafe24"),
+        ShopSpec("fiberland.co.kr", "cafe24"),
+        ShopSpec("exatek.co.kr", "cafe24"),
+        ShopSpec("btobcctv.com", "cafe24"),
+        ShopSpec("tipsmall.co.kr", "cafe24"),
+        ShopSpec("jiantatmall.co.kr", "cafe24"),
+        ShopSpec("e-punglim.co.kr", "cafe24"),
+        ShopSpec("boosungcamera.co.kr", "cafe24"),
+        ShopSpec("hungrydica.kr", "cafe24"),
+        ShopSpec("www.laondigital.co.kr", "cafe24"),
+        ShopSpec("mediaviewsu.com", "cafe24"),
+        ShopSpec("icepia.co.kr", "cafe24"),
+        ShopSpec("www.cctv-mstore.com", "godomall"),
+        ShopSpec("www.safecctv.net", "godomall"),
+        ShopSpec("www.comeontop.co.kr", "godomall"),
+        ShopSpec("www.bipum.net", "godomall"),
+    )
+    cross_markup_threshold: Decimal = Decimal("1.10")
+    retail_markup_threshold: Decimal = Decimal("1.10")
+    min_item_expected_krw: int = 300_000
+    max_benchmarks_per_item: int = 5
+    region_all_token: str = "전지역"  # noqa: S105
+    install_terms: tuple[str, ...] = ("현장설치도",)
+    install_allowance_rate: Decimal = Decimal("0.15")
+    min_offer_count: int = 2
+    outlier_ratio: Decimal = Decimal("1.15")
+    single_offer_stability_ratio: Decimal = Decimal("1.25")
+    oem_gap_cap: Decimal = Decimal("3")
+    single_piece_units: tuple[str, ...] = ("대", "개", "EA", "ea", "Ea")
+    accessory_markers: tuple[str, ...] = (
+        "액세서리",
+        "소모품",
+        "전용",
+        "호환",
+        "리모컨",
+        "리모콘",
+        "램프",
+        "케이스",
+        "브라켓",
+        "브래킷",
+        "거치대",
+        "토너",
+        "잉크",
+        "필터",
+        "렌탈",
+        "중고",
+        "리퍼",
+        "파우치",
+        "커버",
+        "필름",
+        "가방",
+        "회전유리판",
+        "부품",
+        "충전기",
+        "배터리",
+        "재생",
+        "해외구매",
+    )
+    pack_markers: tuple[str, ...] = (
+        r"\(\s*\d+\s*[xX×]",  # noqa: RUF001
+        r"[xX×]\s*\d+\s*\)",  # noqa: RUF001
+        r"\d+\s*(개입|팩|박스)",
+        r"세트\)",
+        r"패키지",
+    )
+    brand_aliases: tuple[tuple[str, str], ...] = (
+        ("엘지", "LG"),
+        ("삼성", "SAMSUNG"),
+        ("캐논", "CANON"),
+        ("엡손", "EPSON"),
+        ("브라더", "BROTHER"),
+        ("소니", "SONY"),
+        ("파나소닉", "PANASONIC"),
+        ("니콘", "NIKON"),
+        ("뷰소닉", "VIEWSONIC"),
+        ("벤큐", "BENQ"),
+        ("시스코", "CISCO"),
+        ("넷기어", "NETGEAR"),
+        ("씨게이트", "SEAGATE"),
+        ("웨스턴디지털", "WESTERNDIGITAL"),
+        ("인터엠", "인터M"),
+        ("솔텍", "SOLTECH"),
+        ("하니웰", "HONEYWELL"),
+        ("아이디스", "IDIS"),
+        ("에이텐", "ATEN"),
+        ("쿠쿠", "CUCKOO"),
+        ("델", "DELL"),
+        ("레노버", "LENOVO"),
+        ("옵토마", "OPTOMA"),
+        ("샤프", "SHARP"),
+        ("리코", "RICOH"),
+        ("교세라", "KYOCERA"),
+        ("신도", "SINDOH"),
+        ("티피링크", "TPLINK"),
+    )
+    max_lines_per_draft: int = 500
+    max_draft_bytes: int = 1_000_000
+
+    def __post_init__(self) -> None:
+        for field_name, placeholder in _TEMPLATE_PLACEHOLDERS:
+            value = getattr(self, field_name)
+            _check_url(value, field_name)
+            if not value.startswith("https://") or placeholder not in value:
+                raise ConfigError(f"[SYS] invalid {field_name}: must be an https URL with {placeholder}")
+        for threshold_name in ("cross_markup_threshold", "retail_markup_threshold"):
+            threshold = getattr(self, threshold_name)
+            if not threshold.is_finite() or threshold < 1:
+                raise ConfigError(f"[SYS] invalid {threshold_name}: must be finite and >= 1")
+        for rate_name in ("install_allowance_rate",):
+            rate = getattr(self, rate_name)
+            if not rate.is_finite() or rate < 0:
+                raise ConfigError(f"[SYS] invalid {rate_name}: must be finite and >= 0")
+        for ratio_name in ("outlier_ratio", "single_offer_stability_ratio", "oem_gap_cap"):
+            ratio = getattr(self, ratio_name)
+            if not ratio.is_finite() or ratio < 1:
+                raise ConfigError(f"[SYS] invalid {ratio_name}: must be finite and >= 1")
+        if self.min_item_expected_krw < 0:
+            raise ConfigError("[SYS] invalid min_item_expected_krw: must be >= 0")
+        if self.min_offer_count < 1:
+            raise ConfigError("[SYS] invalid min_offer_count: must be >= 1")
+        if self.max_benchmarks_per_item < 1:
+            raise ConfigError("[SYS] invalid max_benchmarks_per_item: must be >= 1")
+        if self.max_lines_per_draft < 1:
+            raise ConfigError("[SYS] invalid max_lines_per_draft: must be >= 1")
+        if self.max_draft_bytes < 1:
+            raise ConfigError("[SYS] invalid max_draft_bytes: must be >= 1")
+        if not math.isfinite(self.public_request_interval_seconds) or self.public_request_interval_seconds < 0:
+            raise ConfigError("[SYS] invalid public_request_interval_seconds: must be finite and >= 0")
+        for shop in self.shops:
+            if shop.platform not in ("cafe24", "godomall"):
+                raise ConfigError(f"[SYS] invalid shop platform: {shop.platform!r} must be cafe24 or godomall")
+            if not shop.host or "/" in shop.host:
+                raise ConfigError(f"[SYS] invalid shop host: {shop.host!r} must be a bare hostname")
+            _check_url("https://" + shop.host, "shop host")
+            if urlparse("https://" + shop.host).hostname != shop.host.lower():
+                raise ConfigError("[SYS] invalid shop host: must be a bare hostname")
+        for host in self.public_hosts():
+            normalized = host.lower().rstrip(".")
+            if normalized in _CREDENTIAL_HOSTS or normalized.endswith("workers.dev"):
+                raise ConfigError(f"[SYS] invalid public host: {host!r} is a credential destination")
+
+    def public_hosts(self) -> frozenset[str]:
+        """Return every host a credential-less page fetch may target."""
+        hosts = {
+            urlparse(getattr(self, field_name)).hostname or ""
+            for field_name, _ in _TEMPLATE_PLACEHOLDERS
+        }
+        hosts.update(shop.host.lower() for shop in self.shops)
+        hosts.discard("")
+        return frozenset(hosts)
