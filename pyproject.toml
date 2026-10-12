@@ -5,7 +5,9 @@ description = "SaveTax Project"
 readme = "README.md"
 requires-python = "==3.11.*"
 
-dependencies = []
+dependencies = [
+    "duckdb>=1.1",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]
