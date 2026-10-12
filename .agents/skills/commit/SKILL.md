@@ -31,10 +31,10 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
 3. **Strict Korean Language Invariant (Subject & Body)**:
    - **All commit subjects and Why bodies MUST be written in natural Korean.**
    - **Subject Format**: `<type>: <한국어 1줄 요약 <= 50자>` (비즈니스/기능 목적 지향, 영어 설명 금지)
-     - ✅ `feat: 실시간 데이터 수집 및 정합성 검증 파이프라인 연동`
+     - ✅ `feat: 조달 물품 이상 가격 탐색 알고리즘 및 다나와 가격 대조 검증 연동`
      - ❌ `feat: implement data collection pipeline`
    - **Body Format**: `- **Why:** <해결한 구체적 문제나 비즈니스 목적을 명확한 한국어로 기술>`
-     - Example: `- **Why:** 주문 체결 시 슬리피지 보정 및 상태 전이 신뢰성 확보`
+     - Example: `- **Why:** 조달청 고가 납품 의심 품목 식별 및 시중 최저가 비교 검증 신뢰도 확보`
    - **Prohibited Metadata**: Do not add `Co-authored-by:`, AI model names, or session trailers. Keep commits clean with only subject and rationale.
    - **Execution Safety**: Use safe quoting or heredoc syntax to prevent shell syntax errors when commit messages contain special characters.
 

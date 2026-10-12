@@ -225,3 +225,6 @@ tmp/
 docs/specs/
 .serena/
 
+# Hackathon Guides & Secrets (PAT Protection)
+savetax-guide.md
+

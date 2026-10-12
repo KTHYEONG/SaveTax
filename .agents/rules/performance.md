@@ -1,20 +1,20 @@
-# Performance & Optimization Directives (Physical Invariants)
+# Performance & Optimization Directives: SaveTax Hackathon
 
-> **Performance is an architectural invariant, not an afterthought. Never fake speed by silently truncating date ranges, universe constituents, or numerical precision. Correctness strictly precedes speed. Maximize hardware throughput within four physical boundaries.**
+> **Performance is an architectural invariant, not an afterthought. Never fake speed by silently omitting candidate batches, truncating catalog searches, or skipping evidence validation. Correctness strictly precedes speed. Maximize throughput across dataset exploration and candidate auditing within physical boundaries.**
 
 ## 1. Bounded Resource Scaling & Memory Discipline
-- **Bounded Resource Scaling:** Memory consumption must remain safely bounded within available host physical RAM. Select data structures and processing patterns whose memory footprint scales predictably with workload size; prevent unconstrained accumulation of intermediate state.
-- **Eliminate Unnecessary Duplication:** Eliminate redundant in-memory data copies, intermediate full-collection materializations, and unneeded conversions. Prefer views, zero-copy operations, or memory-efficient formats when handling substantial datasets.
-- **Deterministic Resource Reclamation:** Heavy memory buffers, file descriptors, network connections, and worker pools must be deterministically released or closed when exiting their operational scope.
+- **Bounded Resource Scaling:** Memory consumption must remain safely bounded within available host RAM. When processing the large official `savetax-products.zip` or full Parquet tables, use streaming, chunked reading, or DuckDB disk-backed/view-based processing rather than loading entire multi-gigabyte tables into uncompressed Python memory.
+- **Eliminate Unnecessary Duplication:** Avoid redundant in-memory DataFrame copies, intermediate JSON serializations, and repeated regex compilations.
+- **Deterministic Resource Reclamation:** Explicitly close DuckDB connections, zip file streams, network response iterators, and temporary file handles upon exiting operational scopes.
 
 ## 2. Algorithmic Locality & Hot Path Efficiency
-- **Hot Path Algorithmic Efficiency:** In computationally intensive loops or hot iteration paths, eliminate nested linear scans and repetitive collection filtering ($O(N^2)$ pitfalls). Use pre-indexed structures, hashing, grouping, or cursor positioning where lookup frequency is high.
-- **I/O Locality & Pushdown:** Prohibit repetitive text parsing or deserialization in hot computational paths. Leverage efficient binary or columnar storage with column pruning and predicate pushdown for substantial data I/O.
+- **Hot Path Algorithmic Efficiency:** When comparing thousands of procurement items against market price records, eliminate nested linear scans ($O(N \times M)$ traps). Pre-index catalogs using hash maps, standardized model codes, or DuckDB relational joins.
+- **I/O Locality & Column Pruning:** Never read unused metadata columns during full-catalog scans. Leverage DuckDB columnar projection pushdown (`SELECT id, name, price, qty...`) and predicate filtering (`WHERE price > min_threshold`) to minimize disk and bus traffic.
 
-## 3. Separation of Invariant Features and Dynamic State
-- **One-Pass Invariant Materialization:** Where compute scale warrants and working memory budgets permit, compute state-independent features and indicators once upstream across the historical timeline. For massive datasets exceeding comfortable in-memory working sets, process in bounded chronological chunks.
-- **Minimal Hot Paths:** Confine inner sequential iteration strictly to state-dependent transitions. Never recompute static or historical invariants inside simulation loops or across optimization folds.
+## 3. Candidate Exploration & Seeded Shuffling
+- **Participant-Seeded Batching:** In DuckDB full catalog scans, generate deterministic pseudorandom batches using the competition API's public handle and dataset version as seeds. Ensure reproducible, non-overlapping batch traversals.
+- **Early Rejection Heuristics:** Filter out obvious non-anomalies early in the pipeline (e.g., procurement prices below market baseline, tiny contract quantities with negligible waste) before triggering expensive external Danawa MCP searches or full specification parsing.
 
 ## 4. Hardware Saturation & Observable Throughput
-- **Balanced Parallelism:** When verified compute bottlenecks exist on parallelizable workloads, saturate available CPU cores while ensuring compute granularity heavily amortizes inter-process communication (IPC) overhead. Avoid unnecessary multiprocessing setup for lightweight operations.
-- **Continuous Progress Telemetry:** Long-running workloads must emit deterministic progress heartbeats. A silent pipeline is indistinguishable from a deadlocked system.
+- **Balanced Parallelism:** Saturate available CPU cores for compute-heavy specification parsing or batch anomaly scoring. Ensure batch sizes are large enough to amortize worker communication costs.
+- **Continuous Progress Telemetry:** Long-running dataset ingestion or batch audit scans must emit periodic progress heartbeats (e.g., every 5,000 items or 10 seconds). A silent audit pipeline is indistinguishable from a deadlocked process.
