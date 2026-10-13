@@ -188,7 +188,7 @@ def test_action_review_fails_closed(case: str) -> None:
 
 def test_action_approval_requires_item(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="requires --item"):
-        run_approve(_drafts(), event=_event(), status=_status(), competition=_Competition(),
+        run_approve([], event=_event(), status=_status(), competition=_Competition(),
                     submission_client=_Submissions(), ledger=_ledger(tmp_path), now=_now(),
                     challenge="irrelevant", note="yes", kind="withdraw")  # type: ignore[arg-type]
 

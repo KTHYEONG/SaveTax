@@ -886,3 +886,269 @@ def test_submit_limit_truncates_run(tmp_path: Path) -> None:
     assert code == 0
     assert len(receipts) == 1
     assert len(subs.submits) == 1
+
+
+def _revise_event(phase: str = "RUNNING"):
+    from dataclasses import replace
+
+    return replace(_event(), phase=phase)
+
+
+def test_revision_accepts_live_running_phase(tmp_path: Path) -> None:
+    from src.savetax.workflow import run_revise
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    _approve(ledger, "11111111", body_hash(_body()), kind="revise")
+    receipt = run_revise("SID1", "11111111", _body(), submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                         now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                         bundle=_bundle(), event=_revise_event("RUNNING"), fetch_price=lambda _: 1000)
+    assert receipt is not None
+
+
+def test_revision_refuses_closed_phase(tmp_path: Path) -> None:
+    from src.savetax.workflow import run_revise
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    _approve(ledger, "11111111", body_hash(_body()), kind="revise")
+    with pytest.raises(ConfigError):
+        run_revise("SID1", "11111111", _body(), submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                   now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                   bundle=_bundle(), event=_revise_event("ENDED"), fetch_price=lambda _: 1000)
+    assert subs.revises == []
+
+
+def test_batch_dry_run_writes_nothing(tmp_path: Path) -> None:
+    from src.savetax.workflow import run_action_batch
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    targets = [("11111111", "SID1", _body("11111111"), _bundle("11111111")),
+               ("22222222", "SID2", _body("22222222"), _bundle("22222222")),
+               ("33333333", "SID3", _body("33333333"), _bundle("33333333"))]
+    out = io.StringIO()
+    done, skipped = run_action_batch("revise", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                                     now=_now(), ttl=timedelta(hours=6), execute=False,
+                                     pause_seconds=0, stop_after_consecutive_suspect=2,
+                                     fetch_price=lambda _: 1000, event_provider=_event,
+                                     clock=_now, sleep=lambda _: None, out=out)
+    assert (done, skipped) == (0, 0)
+    assert out.getvalue().count("would-revise") == 3
+    assert subs.revises == []
+
+
+def test_batch_unapproved_skipped_not_fatal(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash, run_action_batch
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    bodies = [_body("11111111"), _body("22222222"), _body("33333333")]
+    bundles = [_bundle("11111111"), _bundle("22222222"), _bundle("33333333")]
+    details = [SubmissionDetail(submission_id=f"SID{i+1}", item_id=item, state="accepted", revision=2,
+                                amount_krw=2000, held=False, lint_status="clean",
+                                lint_lines=(), lint_hints=())
+               for i, item in enumerate(["11111111", "22222222", "33333333"])]
+    subs.details = details
+    for item, body, detail in [("11111111", bodies[0], details[0]), ("33333333", bodies[2], details[2])]:
+        ledger.append(LedgerEntry(at=_now(), kind="approved", item_id=item, submission_id=None,
+                                  body_sha256=action_hash("revise", detail, body), idempotency_key=None,
+                                  data={"kind": "revise", "note": "yes", "total": 1}))
+    targets = [(item, det.submission_id, body, bundle)
+               for item, det, body, bundle in zip(["11111111", "22222222", "33333333"], details, bodies, bundles, strict=True)]
+    done, skipped = run_action_batch("revise", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                                     now=_now(), ttl=timedelta(hours=6), execute=True,
+                                     pause_seconds=0, stop_after_consecutive_suspect=2,
+                                     fetch_price=lambda _: 1000, event_provider=_event,
+                                     clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert (done, skipped) == (2, 1)
+    assert any(e.kind == "refused" for e in ledger.entries())
+
+
+def test_batch_two_suspects_stop(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash, run_action_batch
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    items = ["11111111", "22222222", "33333333"]
+    bodies = [_body(i) for i in items]
+    bundles = [_bundle(i) for i in items]
+    details = [SubmissionDetail(submission_id=f"SID{i+1}", item_id=item, state="accepted", revision=2,
+                                amount_krw=2000, held=False, lint_status="suspect",
+                                lint_lines=(LintLine(fact_id="F1", verdict="suspect", reason="x"),),
+                                lint_hints=()) for i, item in enumerate(items)]
+    subs.details = details
+    for item, body, detail in zip(items, bodies, details, strict=True):
+        ledger.append(LedgerEntry(at=_now(), kind="approved", item_id=item, submission_id=None,
+                                  body_sha256=action_hash("revise", detail, body), idempotency_key=None,
+                                  data={"kind": "revise", "note": "yes", "total": 1}))
+    targets = list(zip(items, [d.submission_id for d in details], bodies, bundles, strict=True))
+    done, _ = run_action_batch("revise", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                               now=_now(), ttl=timedelta(hours=6), execute=True,
+                               pause_seconds=0, stop_after_consecutive_suspect=2,
+                               fetch_price=lambda _: 1000, event_provider=_event,
+                               clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert done == 2
+    assert len(subs.revises) == 2
+
+
+def test_batch_limit_error_stops(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash, run_action_batch
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+
+    def fail(_b: Mapping[str, object], _k: str) -> Receipt:
+        raise ApiError("competition", 403, "REVISION_LIMIT", "limit", False)
+
+    subs.submit_impl = fail
+    items = ["11111111", "22222222"]
+    bodies = [_body(i) for i in items]
+    bundles = [_bundle(i) for i in items]
+    details = [SubmissionDetail(submission_id=f"SID{i+1}", item_id=item, state="accepted", revision=2,
+                                amount_krw=2000, held=False, lint_status="clean",
+                                lint_lines=(), lint_hints=()) for i, item in enumerate(items)]
+    subs.details = details
+    for item, body, detail in zip(items, bodies, details, strict=True):
+        ledger.append(LedgerEntry(at=_now(), kind="approved", item_id=item, submission_id=None,
+                                  body_sha256=action_hash("revise", detail, body), idempotency_key=None,
+                                  data={"kind": "revise", "note": "yes", "total": 1}))
+    targets = list(zip(items, [d.submission_id for d in details], bodies, bundles, strict=True))
+    done, _ = run_action_batch("revise", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                               now=_now(), ttl=timedelta(hours=6), execute=True,
+                               pause_seconds=0, stop_after_consecutive_suspect=2,
+                               fetch_price=lambda _: 1000, event_provider=_event,
+                               clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert done == 0
+    assert len(subs.revises) == 1
+
+
+def test_batch_withdraw_sends_no_body(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash, run_action_batch
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions()
+    items = ["11111111", "22222222"]
+    bodies = [{"canonical_product_id": i} for i in items]
+    details = [SubmissionDetail(submission_id=f"SID{i+1}", item_id=item, state="accepted", revision=1,
+                                amount_krw=2000, held=False, lint_status="clean",
+                                lint_lines=(), lint_hints=()) for i, item in enumerate(items)]
+    subs.details = details
+    for item, body, detail in zip(items, bodies, details, strict=True):
+        ledger.append(LedgerEntry(at=_now(), kind="approved", item_id=item, submission_id=None,
+                                  body_sha256=action_hash("withdraw", detail, body), idempotency_key=None,
+                                  data={"kind": "withdraw", "note": "yes", "total": 1}))
+    targets = [(item, det.submission_id, body, None) for item, det, body in zip(items, details, bodies, strict=True)]
+    done, _ = run_action_batch("withdraw", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                               now=_now(), ttl=timedelta(hours=6), execute=True,
+                               pause_seconds=0, stop_after_consecutive_suspect=2,
+                               fetch_price=lambda _: 1000, event_provider=_event,
+                               clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert done == 2
+    assert subs.withdraws == ["SID1", "SID2"]
+
+
+def test_approve_multiple_without_item(tmp_path: Path) -> None:
+    subs = _Submissions()
+    subs.my_submissions = [subs.get_submission("SID1")]
+    subs._preview = _preview(total=900, action="revise_existing")
+    drafts = [("11111111", _body("11111111"), _bundle("11111111", 900))]
+    from src.savetax.workflow import run_approve
+
+    with pytest.raises(ConfigError, match="challenge mismatch"):
+        run_approve(drafts * 2, event=_event(), status=_status(), competition=_Competition(),  # type: ignore[arg-type]
+                    submission_client=subs, ledger=_ledger(tmp_path), now=_now(),  # type: ignore[arg-type]
+                    challenge="APPROVE 0 0 deadbeef", note="yes", kind="revise")
+
+
+def test_action_review_withdraw_product_mismatch() -> None:
+    import io
+    from src.savetax.workflow import action_review
+    import pytest
+    from src.savetax.errors import ConfigError
+    subs = _Submissions()
+    subs.my_submissions = [_clean_detail()]
+    drafts = [("11111111", {"canonical_product_id": "other"}, _bundle("11111111", 2000))]
+    with pytest.raises(ConfigError):
+        action_review(drafts, subs, "withdraw", out=io.StringIO())  # type: ignore[arg-type]
+
+
+def test_withdraw_closed_phase_raises(tmp_path) -> None:
+    from dataclasses import replace
+    from src.savetax.workflow import run_withdraw
+    import pytest
+    from src.savetax.errors import ConfigError
+    ledger = _ledger(tmp_path)
+    subs = _Submissions()
+    _approve(ledger, "11111111", __import__("src.savetax.workflow", fromlist=["action_hash"]).action_hash("withdraw", subs.get_submission("SID1"), _body()), kind="withdraw")
+    with pytest.raises(ConfigError):
+        run_withdraw("SID1", "11111111", _body(), submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                     now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                     event=replace(_event(), phase="ENDED"), clock=_now)
+
+
+def test_batch_invalid_kind_raises(tmp_path) -> None:
+    from src.savetax.workflow import run_action_batch
+    import pytest
+    from src.savetax.errors import ConfigError
+    with pytest.raises(ConfigError):
+        run_action_batch("bogus", [], submission_client=_Submissions(), ledger=_ledger(tmp_path),  # type: ignore[arg-type]
+                         now=_now(), ttl=timedelta(hours=6), execute=True, pause_seconds=0,
+                         stop_after_consecutive_suspect=2, fetch_price=lambda _: 1000,
+                         event_provider=_event, clock=_now, sleep=lambda _: None, out=io.StringIO())
+
+
+def test_batch_none_bundle_skipped_and_pending_stops(tmp_path) -> None:
+    from src.savetax.errors import SubmissionPending
+    from src.savetax.workflow import run_action_batch
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    targets = [("11111111", "SID1", _body("11111111"), None)]
+    done, skipped = run_action_batch("revise", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                                     now=_now(), ttl=timedelta(hours=6), execute=True, pause_seconds=0,
+                                     stop_after_consecutive_suspect=2, fetch_price=lambda _: 1000,
+                                     event_provider=_event, clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert (done, skipped) == (0, 1)
+    def boom(body, key):
+        raise SubmissionPending(key)
+    subs.submit_impl = boom
+    from src.savetax.workflow import action_hash
+    bodies = [_body("11111111")]
+    bundles = [_bundle("11111111")]
+    detail = SubmissionDetail(submission_id="SID1", item_id="11111111", state="accepted", revision=2,
+                              amount_krw=2000, held=False, lint_status="clean", lint_lines=(), lint_hints=())
+    subs.details = [detail]
+    ledger2 = _ledger(tmp_path / "p2")
+    ledger2.append(LedgerEntry(at=_now(), kind="approved", item_id="11111111", submission_id=None,
+                               body_sha256=action_hash("revise", detail, bodies[0]), idempotency_key=None,
+                               data={"kind": "revise", "note": "yes", "total": 1}))
+    done2, _ = run_action_batch("revise", [("11111111", "SID1", bodies[0], bundles[0])], submission_client=subs, ledger=ledger2,  # type: ignore[arg-type]
+                                now=_now(), ttl=timedelta(hours=6), execute=True, pause_seconds=0,
+                                stop_after_consecutive_suspect=2, fetch_price=lambda _: 1000,
+                                event_provider=_event, clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert done2 == 0
+
+
+def test_batch_retryable_error_skipped_and_fallback_status(tmp_path) -> None:
+    from src.savetax.workflow import run_action_batch, action_hash
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(action="revise_existing"))
+    def retry(body, key):
+        raise ApiError("competition", 500, "TRY_AGAIN", "x", True)
+    subs.submit_impl = retry
+    items = ["11111111"]
+    bodies = [_body(i) for i in items]
+    bundles = [_bundle(i) for i in items]
+    details = [SubmissionDetail(submission_id="SID1", item_id="11111111", state="accepted", revision=2,
+                                amount_krw=2000, held=False, lint_status="clean", lint_lines=(), lint_hints=())]
+    subs.details = details
+    for item, body, detail in zip(items, bodies, details, strict=True):
+        ledger.append(LedgerEntry(at=_now(), kind="approved", item_id=item, submission_id=None,
+                                  body_sha256=action_hash("revise", detail, body), idempotency_key=None,
+                                  data={"kind": "revise", "note": "yes", "total": 1}))
+    targets = list(zip(items, ["SID1"], bodies, bundles, strict=True))
+    done, skipped = run_action_batch("revise", targets, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                                     now=_now(), ttl=timedelta(hours=6), execute=True, pause_seconds=0,
+                                     stop_after_consecutive_suspect=2, fetch_price=lambda _: 1000,
+                                     event_provider=_event, clock=_now, sleep=lambda _: None, out=io.StringIO())
+    assert (done, skipped) == (0, 1)

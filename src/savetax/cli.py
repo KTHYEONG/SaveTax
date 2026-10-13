@@ -18,8 +18,11 @@ if TYPE_CHECKING:
     from _typeshed import SupportsWrite
 
     from src.savetax.competition import CompetitionClient
+    from src.savetax.config import ApprovalConfig
+    from src.savetax.ledger import Ledger
     from src.savetax.publicweb import PublicFetcher
-    from src.savetax.submissions import SubmissionClient
+    from src.savetax.remediation import RemediationRow
+    from src.savetax.submissions import PreviewResult, SubmissionClient, SubmissionDetail
     from src.savetax.writehttp import WriteTransport
 
 from src.savetax.competition import CompetitionClient, ItemState
@@ -73,6 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--include-review", action="store_true")
     evidence.add_argument("--unit-policy", choices=("annotate", "reject"), default="annotate")
     evidence.add_argument("--variant-policy", choices=("strict", "allow_low_fact", "off"), default="strict")
+    evidence.add_argument("--owned", action="store_true")
     review = sub.add_parser("review")
     review.add_argument("--drafts-dir", type=Path)
     review.add_argument("--limit", type=int)
@@ -98,6 +102,17 @@ def _build_parser() -> argparse.ArgumentParser:
     withdraw = sub.add_parser("withdraw")
     withdraw.add_argument("--item", required=True)
     withdraw.add_argument("--execute", action="store_true")
+    remediate = sub.add_parser("remediate")
+    remediate_sub = remediate.add_subparsers(dest="remediate_command", required=True)
+    remediate_sub.add_parser("plan")
+    rem_approve = remediate_sub.add_parser("approve")
+    rem_approve.add_argument("--kind", choices=("revise", "withdraw"), required=True)
+    rem_approve.add_argument("--challenge", required=True)
+    rem_approve.add_argument("--note", required=True)
+    rem_run = remediate_sub.add_parser("run")
+    rem_run.add_argument("--kind", choices=("revise", "withdraw"), required=True)
+    rem_run.add_argument("--limit", type=int)
+    rem_run.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -200,6 +215,7 @@ def _run_cross_lane(
     limit: int,
     include_review: bool,
     unit_conflicts: list[dict[str, str]],
+    allowed_states: frozenset[ItemState] = frozenset({ItemState.AVAILABLE}),
 ) -> tuple[int, int, int]:
     bundles: list[EvidenceBundle] = []
     variant_results: dict[str, tuple[bool, int]] = {}
@@ -214,13 +230,18 @@ def _run_cross_lane(
         candidates_n = len(found)
         ids = [c.item_id for c in found]
         states = {result.input: result.state for result in competition.lookup_items(ids)}
-        available = [c for c in found if states.get(c.item_id) is ItemState.AVAILABLE]
+        available = [c for c in found if states.get(c.item_id) in allowed_states]
         available_n = len(available)
         event = competition.get_event()
         today = date.today()
         for candidate in available[:limit]:
             try:
                 detail = competition.get_item(candidate.item_id)
+                if ItemState.CLAIMED_BY_ME in allowed_states and (
+                    detail.facts_total is None or detail.facts_truncated
+                    or detail.facts_total != len(detail.facts)
+                ):
+                    raise DataAccessPending("[DATA] own item facts unavailable: 자료 접근 대기")
                 def record_variant_result(
                     bearing: bool, unresolved: int, item_id: str = candidate.item_id,
                 ) -> None:
@@ -229,6 +250,7 @@ def _run_cross_lane(
                 bundle = build_cross_bundle(
                     candidate, detail, dataset, raw, fetcher, evidence, audit,
                     today=today, on_unit_conflict=unit_conflicts.append,
+                    allowed_states=allowed_states,
                     on_variant_result=record_variant_result,
                 )
                 if bundle is None:
@@ -242,6 +264,8 @@ def _run_cross_lane(
                 write_draft(body, Path(out_dir) / "drafts" / f"{bundle.item_id}.json")
                 drafts += 1
             except ApiError as exc:
+                if ItemState.CLAIMED_BY_ME in allowed_states:
+                    raise DataAccessPending("[DATA] own evidence unavailable: 자료 접근 대기") from exc
                 logger.info("[EVIDENCE] item_id=%s skipped=api_error:%s", redact(candidate.item_id), redact(exc.code))
                 continue
     finally:
@@ -371,24 +395,34 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
         wanted = [part.strip() for part in str(args.items).split(",") if part.strip()]
         wanted = list(dict.fromkeys(wanted))
     records: list[dict[str, str]] = []
+    owned = bool(getattr(args, "owned", False))
+    conflict_dir = Path(out_dir) / "remediation" if owned else Path(out_dir)
     try:
         with Dataset(config, audit) as dataset:
-            if args.lane in ("cross", "all"):
+            if owned:
+                remediation_out = Path(out_dir) / "remediation"
                 _run_cross_lane(
-                    competition, raw, fetcher, evidence, audit, Path(out_dir),
+                    competition, raw, fetcher, evidence, audit, remediation_out,
                     dataset, wanted, limit, args.include_review, records,
+                    frozenset({ItemState.CLAIMED_BY_ME}),
                 )
-            if args.lane in ("retail", "all"):
-                handle = config.participant_handle
-                if not handle:
-                    handle = competition.get_me().handle
-                _run_retail_lane(
-                    competition, raw, fetcher, evidence, audit, Path(out_dir),
-                    dataset, wanted, limit, args.include_review, handle, batch,
-                    batches, separate_drafts=args.lane == "all",
-                )
+            else:
+                if args.lane in ("cross", "all"):
+                    _run_cross_lane(
+                        competition, raw, fetcher, evidence, audit, Path(out_dir),
+                        dataset, wanted, limit, args.include_review, records,
+                    )
+                if args.lane in ("retail", "all"):
+                    handle = config.participant_handle
+                    if not handle:
+                        handle = competition.get_me().handle
+                    _run_retail_lane(
+                        competition, raw, fetcher, evidence, audit, Path(out_dir),
+                        dataset, wanted, limit, args.include_review, handle, batch,
+                        batches, separate_drafts=args.lane == "all",
+                    )
     finally:
-        _append_unit_conflicts(Path(out_dir), records)
+        _append_unit_conflicts(conflict_dir, records)
         logger.info(
             "[EVIDENCE] unit_conflicts=%d items=%d policy=%s",
             len(records), len({record["item_id"] for record in records}),
@@ -516,14 +550,15 @@ def _run_review(
         raise ConfigError("[SYS] limit must be >= 1")
     _, competition, submissions, _ = _submission_stack(environ, transport, write_transport)
     now = _utcnow()
+    bundle_dir = Path(drafts_dir).parent if args.drafts_dir is not None else evidence.evidence_dir
     joined = (_single_draft(args.draft, evidence.evidence_dir, now) if args.draft is not None
-              else _workflow_inputs(Path(drafts_dir), evidence.evidence_dir, now))
+              else _workflow_inputs(Path(drafts_dir), bundle_dir, now))
     if args.item is not None:
         joined = [entry for entry in joined if entry[0] == args.item]
     if args.kind != "submit":
-        if args.item is None:
+        if args.item is None and args.drafts_dir is None and args.draft is None:
             raise ConfigError("[SYS] action review requires --item")
-        rows, _ = action_review(joined, submissions, args.kind)
+        rows, _ = action_review(joined[:args.limit], submissions, args.kind)
         review = build_review_set(rows, competition.get_event(), now)
         import sys
 
@@ -680,10 +715,271 @@ def _run_withdraw(
     submission_id = submission_for_item(ledger, str(args.item))
     if submission_id is None:
         raise ConfigError("[SYS] unknown withdraw item: never submitted")
-    _, _, submissions, _ = _submission_stack(environ, transport, write_transport, allow_writes=True)
+    _, competition, submissions, _ = _submission_stack(environ, transport, write_transport, allow_writes=True)
     receipt = run_withdraw(submission_id, str(args.item), body, submission_client=submissions, ledger=ledger,
-                 now=now, ttl=timedelta(hours=approval.ttl_hours), execute=True, clock=_utcnow)
+                 now=now, ttl=timedelta(hours=approval.ttl_hours), execute=True, clock=_utcnow,
+                 event_provider=competition.get_event)
     return 0 if receipt is not None else 2
+
+
+def _remediation_paths(evidence_dir: Path) -> tuple[Path, Path, Path, Path]:
+    rem = Path(evidence_dir) / "remediation"
+    return rem, rem / "drafts", rem / "cross-bundles.jsonl", rem / "plan.jsonl"
+
+
+def _load_rebuilt(drafts_dir: Path, bundles_path: Path, now: datetime) -> dict[str, tuple[dict[str, object], EvidenceBundle]]:
+    from src.savetax.errors import DataIntegrityError
+    from src.savetax.workflow import load_bundles, load_drafts, matching_bundle
+
+    drafts = load_drafts(drafts_dir)
+    bundles = load_bundles([bundles_path], now=now)
+    out: dict[str, tuple[dict[str, object], EvidenceBundle]] = {}
+    for item, body in drafts:
+        try:
+            bundle = matching_bundle(body, bundles)
+        except DataIntegrityError:
+            if item in bundles and not bundles[item].lines:
+                continue
+            raise DataIntegrityError("[DATA] remediation draft is missing matching evidence") from None
+        if item not in out or bundle.expected_total_krw > out[item][1].expected_total_krw:
+            out[item] = (body, bundle)
+    return out
+
+
+def _submitted_hashes(ledger: Ledger) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for entry in ledger.entries():
+        if entry.kind in ("submitted", "revised") and entry.item_id and entry.body_sha256:
+            digest = entry.data.get("body_hash", entry.body_sha256 if entry.kind == "submitted" else None)
+            if isinstance(digest, str):
+                out[entry.item_id] = digest
+    return out
+
+
+def _withdraw_bundle(item_id: str, now: datetime) -> EvidenceBundle:
+    from src.savetax.evidence import Lane as _Lane
+
+    return EvidenceBundle(
+        item_id=item_id, lane=_Lane.CROSS_CONTRACT, title=f"withdraw-{item_id}",
+        claim="", comparison_scope="", reproduction_notes="", lines=(),
+        rejected=(), caveats=(), review_required=False, generated_at=now, unit_notes=(),
+    )
+
+
+def _read_plan_rows(plan_path: Path) -> list[dict[str, object]]:
+    import json as _json
+
+    from src.savetax.errors import DataIntegrityError
+
+    try:
+        text = plan_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise DataIntegrityError("[DATA] missing remediation plan: rerun remediate plan") from None
+    rows: list[dict[str, object]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            decoded = _json.loads(line)
+        except ValueError:
+            raise DataIntegrityError("[DATA] malformed remediation plan") from None
+        if not isinstance(decoded, dict):
+            raise DataIntegrityError("[DATA] malformed remediation plan")
+        rows.append(decoded)
+    return rows
+
+
+def _compute_remediation(
+    environ: Mapping[str, str] | None, transport: Transport | None, write_transport: WriteTransport | None,
+) -> tuple[
+    EvidenceConfig, ApprovalConfig, CompetitionClient, SubmissionClient, Ledger, datetime,
+    list[SubmissionDetail], dict[str, tuple[dict[str, object], EvidenceBundle]],
+    dict[str, str], dict[str, PreviewResult], list[RemediationRow], Path,
+]:
+    from src.savetax.config import ApprovalConfig, EvidenceConfig
+    from src.savetax.errors import DataAccessPending, DataIntegrityError
+    from src.savetax.ledger import Ledger
+    from src.savetax.remediation import plan_remediation
+
+    evidence = EvidenceConfig()
+    approval = ApprovalConfig()
+    _, competition, submissions, _ = _submission_stack(environ, transport, write_transport)
+    now = _utcnow()
+    ledger = Ledger(approval.ledger_path, now=_utcnow)
+    own = [d for d in submissions.list_my_submissions() if d.state != "withdrawn"]
+    for detail in own:
+        if detail.item_id is None:
+            continue
+        item_detail = competition.get_item(detail.item_id)
+        if (item_detail.facts_total is None or item_detail.facts_truncated
+                or item_detail.facts_total != len(item_detail.facts)):
+            raise DataAccessPending(f"[DATA] item facts unavailable: {detail.item_id}: 자료 접근 대기")
+    _rem_dir, drafts_dir, bundles_path, plan_path = _remediation_paths(evidence.evidence_dir)
+    rebuilt = _load_rebuilt(drafts_dir, bundles_path, now)
+    hashes = _submitted_hashes(ledger)
+    previews: dict[str, PreviewResult] = {}
+    for item_id, (body, _bundle) in rebuilt.items():
+        try:
+            previews[item_id] = submissions.preview(body)
+        except (ApiError, ConfigError, DataIntegrityError, NetworkError) as exc:
+            logger.info("[SUBMIT] preview skipped item=%s reason=%s", redact(item_id), exc)
+            continue
+    rows = plan_remediation(own, rebuilt, hashes, previews)
+    return evidence, approval, competition, submissions, ledger, now, own, rebuilt, hashes, previews, rows, plan_path
+
+
+def _run_remediate_plan(
+    args: argparse.Namespace, environ: Mapping[str, str] | None,
+    transport: Transport | None, write_transport: WriteTransport | None,
+) -> int:
+    import sys as _sys
+
+    from src.savetax.approval import build_review_set
+    from src.savetax.errors import DomainValidationError
+    from src.savetax.ledger import LedgerEntry
+    from src.savetax.remediation import RemediationAction, write_plan
+    from src.savetax.workflow import action_review
+
+    _evidence, _approval, competition, submissions, _ledger, now, _own, rebuilt, _hashes, _previews, rows, plan_path = (
+        _compute_remediation(environ, transport, write_transport)
+    )
+    write_plan(rows, plan_path)
+    for row in rows:
+        _ledger.append(LedgerEntry(now, "refused", row.item_id, row.submission_id, None, None,
+                                  {"reasons": ["remediation_replanned"]}))
+    out = _sys.stdout
+    out.write("item | sid | action | old_krw | new_krw | old_lines | new_lines | reasons\n")
+    for row in rows:
+        reasons = ",".join(row.reasons)
+        out.write(f"{redact(row.item_id)} | {redact(row.submission_id)} | {row.action.value} | "
+                  f"{row.old_amount_krw} | {row.new_amount_krw} | {row.old_lines} | {row.new_lines} | {reasons}\n")
+    revise_rows = [r for r in rows if r.action is RemediationAction.REVISE]
+    withdraw_rows = [r for r in rows if r.action is RemediationAction.WITHDRAW]
+    keep_rows = [r for r in rows if r.action is RemediationAction.KEEP]
+    old_total = sum(r.old_amount_krw or 0 for r in rows)
+    new_total = sum(r.new_amount_krw for r in rows)
+    out.write(f"totals old_total={old_total} new_total={new_total} "
+              f"revise={len(revise_rows)} withdraw={len(withdraw_rows)} keep={len(keep_rows)}\n")
+    logger.info("[SUBMIT] remediation plan revise=%d withdraw=%d keep=%d old_total=%d new_total=%d",
+                len(revise_rows), len(withdraw_rows), len(keep_rows), old_total, new_total)
+    event = competition.get_event()
+    if revise_rows:
+        drafts = [(r.item_id, rebuilt[r.item_id][0], rebuilt[r.item_id][1]) for r in revise_rows if r.item_id in rebuilt]
+        try:
+            review_rows, _ = action_review(drafts, submissions, "revise", out=out)
+            review = build_review_set(review_rows, event, now)
+            out.write(f"revise challenge={review.challenge} total={review.total_krw}\n")
+        except (DomainValidationError, ConfigError) as exc:
+            logger.warning("[SUBMIT] remediation revise challenge unavailable: %s", exc)
+    if withdraw_rows:
+        drafts_w = [(r.item_id, {"canonical_product_id": r.item_id}, _withdraw_bundle(r.item_id, now)) for r in withdraw_rows]
+        try:
+            review_rows_w, _ = action_review(drafts_w, submissions, "withdraw", out=out)
+            review_w = build_review_set(review_rows_w, event, now)
+            out.write(f"withdraw challenge={review_w.challenge} total={review_w.total_krw}\n")
+        except (DomainValidationError, ConfigError) as exc:
+            logger.warning("[SUBMIT] remediation withdraw challenge unavailable: %s", exc)
+    return 0
+
+
+def _run_remediate_approve(
+    args: argparse.Namespace, environ: Mapping[str, str] | None,
+    transport: Transport | None, write_transport: WriteTransport | None,
+) -> int:
+    from src.savetax.approval import build_review_set
+    from src.savetax.errors import ConfigError
+    from src.savetax.ledger import LedgerEntry
+    from src.savetax.remediation import RemediationAction
+    from src.savetax.workflow import action_review
+
+    if not args.note.strip():
+        raise ConfigError("[SYS] invalid approval note: must be non-empty")
+    _evidence, _approval2, competition, submissions, ledger, now, _own, rebuilt, _h, _p, rows, _plan = (
+        _compute_remediation(environ, transport, write_transport)
+    )
+    wanted = RemediationAction.REVISE if args.kind == "revise" else RemediationAction.WITHDRAW
+    selected = [r for r in rows if r.action is wanted]
+    planned = _read_plan_rows(_plan)
+    current = {(r.item_id, r.submission_id, r.revision, r.action.value) for r in selected}
+    saved = {(r.get("item_id"), r.get("submission_id"), r.get("revision"), r.get("action"))
+             for r in planned if r.get("action") == wanted.value}
+    if current != saved:
+        raise ConfigError("[SYS] remediation plan changed: rerun remediate plan")
+    if args.kind == "revise":
+        drafts = [(r.item_id, rebuilt[r.item_id][0], rebuilt[r.item_id][1]) for r in selected if r.item_id in rebuilt]
+    else:
+        drafts = [(r.item_id, {"canonical_product_id": r.item_id}, _withdraw_bundle(r.item_id, now)) for r in selected]
+    review_rows, targets = action_review(drafts, submissions, args.kind)
+    review = build_review_set(review_rows, competition.get_event(), now)
+    if review.challenge != args.challenge:
+        raise ConfigError("[SYS] approval challenge mismatch")
+    for row in review_rows:
+        ledger.append(LedgerEntry(at=now, kind="approved", item_id=row.item_id,
+                                  submission_id=targets[row.item_id].submission_id if row.item_id in targets else None,
+                                  body_sha256=row.body_sha256, idempotency_key=None,
+                                  data={"kind": args.kind, "note": args.note, "total": row.expected_total_krw}))
+    return 0
+
+
+def _run_remediate_run(
+    args: argparse.Namespace, environ: Mapping[str, str] | None,
+    transport: Transport | None, write_transport: WriteTransport | None,
+) -> int:
+    import sys as _sys
+
+    from src.savetax.config import ApprovalConfig, EvidenceConfig
+    from src.savetax.ledger import Ledger
+    from src.savetax.remediation import RemediationAction
+    from src.savetax.workflow import run_action_batch
+
+    if args.limit is not None and args.limit < 1:
+        raise ConfigError("[SYS] limit must be >= 1")
+    evidence = EvidenceConfig()
+    approval = ApprovalConfig()
+    _rem, _drafts_dir, bundles_path, plan_path = _remediation_paths(evidence.evidence_dir)
+    raw_rows = _read_plan_rows(plan_path)
+    wanted = RemediationAction.REVISE.value if args.kind == "revise" else RemediationAction.WITHDRAW.value
+    filtered = [r for r in raw_rows if str(r.get("action")) == wanted]
+    if args.limit is not None:
+        filtered = filtered[:args.limit]
+    now = _utcnow()
+    allow = bool(args.execute)
+    _, competition, submissions, fetcher = _submission_stack(environ, transport, write_transport, allow_writes=allow)
+    ledger = Ledger(approval.ledger_path, now=_utcnow)
+    rebuilt = _load_rebuilt(_rem / "drafts", bundles_path, now)
+    targets: list[tuple[str, str, Mapping[str, object], EvidenceBundle | None]] = []
+    for entry in filtered:
+        try:
+            item_id = str(entry["item_id"])
+            submission_id = str(entry["submission_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if allow:
+            detail = submissions.get_submission(submission_id)
+            if (detail.item_id != item_id or detail.revision != entry.get("revision")
+                    or detail.state == "withdrawn"):
+                from src.savetax.ledger import LedgerEntry
+
+                ledger.append(LedgerEntry(now, "refused", item_id, submission_id, None, None,
+                                          {"reasons": ["stale_plan"]}))
+                continue
+        if args.kind == "revise":
+            if item_id not in rebuilt:
+                continue
+            body, bundle = rebuilt[item_id]
+            targets.append((item_id, submission_id, body, bundle))
+        else:
+            targets.append((item_id, submission_id, {"canonical_product_id": item_id}, None))
+    out = _sys.stdout
+    run_action_batch(
+        args.kind, targets, submission_client=submissions, ledger=ledger, now=now,
+        ttl=timedelta(hours=approval.ttl_hours), execute=allow,
+        pause_seconds=approval.pause_between_submits_seconds,
+        stop_after_consecutive_suspect=approval.stop_after_consecutive_suspect,
+        fetch_price=lambda url: _live_price(fetcher, url), event_provider=competition.get_event,
+        clock=_utcnow, sleep=time.sleep, out=out,
+    )
+    return 0
 
 
 def main(
@@ -714,6 +1010,12 @@ def main(
             return _run_revise(args, environ, transport, write_transport)
         if args.command == "withdraw":
             return _run_withdraw(args, environ, transport, write_transport)
+        if args.command == "remediate":
+            if args.remediate_command == "plan":
+                return _run_remediate_plan(args, environ, transport, write_transport)
+            if args.remediate_command == "approve":
+                return _run_remediate_approve(args, environ, transport, write_transport)
+            return _run_remediate_run(args, environ, transport, write_transport)
         return _run_evidence(args, environ, transport)
     except NetworkError as exc:
         _pause_log(exc.stage.value, f"restore connectivity to {exc.host} and rerun the batch")

@@ -45,6 +45,7 @@ __all__ = [
     "load_bundles",
     "load_drafts",
     "preflight",
+    "run_action_batch",
     "run_approve",
     "run_review",
     "run_revise",
@@ -57,6 +58,8 @@ __all__ = [
 ]
 
 _STOP_CODES = frozenset({"PARTICIPANT_LIMIT", "DATASET_VERSION_MISMATCH", "SCHEMA_INVALID"})
+
+_BATCH_STOP_CODES = frozenset({"PARTICIPANT_LIMIT", "REVISION_LIMIT", "DATASET_VERSION_MISMATCH", "SCHEMA_INVALID"})
 
 
 def _default_key() -> str:
@@ -311,8 +314,8 @@ def run_approve(
         raise ConfigError("[SYS] invalid approval note: must be non-empty")
     if kind not in ("submit", "revise", "withdraw"):
         raise ConfigError("[SYS] invalid approval kind")
-    if kind != "submit" and item is None:
-        raise ConfigError("[SYS] action approval requires --item")
+    if kind != "submit" and not drafts:
+        raise ConfigError("[SYS] action approval requires --item or drafts")
     usable = sorted(drafts, key=lambda entry: (-entry[2].expected_total_krw, entry[0]))
     if item is not None:
         usable = [entry for entry in usable if entry[0] == item]
@@ -359,11 +362,17 @@ def action_review(
     rows: list[ReviewRow] = []
     targets: dict[str, SubmissionDetail] = {}
     for item, body, bundle in drafts:
-        bundle = bind_bundle(body, bundle)
+        if kind == "withdraw":
+            if body.get("canonical_product_id") != item:
+                raise ConfigError("[SYS] action product mismatch")
+        else:
+            bundle = bind_bundle(body, bundle)
         matches = [detail for detail in own if detail.item_id == item and detail.state != "withdrawn"]
         if len(matches) != 1:
             raise ConfigError("[SYS] action requires exactly one current own submission")
         detail = client.get_submission(matches[0].submission_id)
+        if detail.state == "withdrawn":
+            raise ConfigError("[SYS] action target was withdrawn")
         if detail.item_id != item or body.get("canonical_product_id") != item:
             raise ConfigError("[SYS] action product mismatch")
         preview = client.preview(body) if kind == "revise" else PreviewResult(
@@ -570,7 +579,7 @@ def run_submit(
             LedgerEntry(at=now, kind="submitted", item_id=item_id, submission_id=receipt.submission_id,
                         body_sha256=digest, idempotency_key=key,
                         data={"submission_id": receipt.submission_id, "amount": receipt.amount_krw,
-                              "status": receipt.lint_status})
+                               "status": receipt.lint_status, "body_hash": body_hash(body)})
         )
         stream.write(f"submitted {redact(item_id)} sid={redact(receipt.submission_id)} "
                      f"revision={receipt.revision} amount={receipt.amount_krw}\n")
@@ -640,6 +649,8 @@ def run_revise(
         return None
     body = json.loads(json.dumps(body, ensure_ascii=False, allow_nan=False))
     detail = submission_client.get_submission(submission_id)
+    if detail.state == "withdrawn":
+        raise ConfigError("[SYS] revision target was withdrawn")
     digest = action_hash("revise", detail, body)
     if not verify_approval(ledger, item_id, digest, now, ttl, kind="revise"):
         ledger.append(
@@ -674,8 +685,8 @@ def run_revise(
     if not verify_approval(ledger, item_id, digest, now, ttl, kind="revise"):
         raise ConfigError("[SYS] revision approval expired")
     if (body.get("dataset_release_id") != event.dataset_release_id
-                             or body.get("ruleset_version") != event.ruleset_version
-                             or event.phase != "open" or not event.opens_at <= now < event.closes_at):
+                              or body.get("ruleset_version") != event.ruleset_version
+                              or event.phase.casefold() not in _OPEN_PHASES or not event.opens_at <= now < event.closes_at):
         raise ConfigError("[SYS] revision event changed")
     key = ledger.key_for("revise", item_id, digest, new_key)
     try:
@@ -689,12 +700,12 @@ def run_revise(
         LedgerEntry(at=now, kind="revised", item_id=item_id, submission_id=receipt.submission_id,
                     body_sha256=digest, idempotency_key=key,
                         data={"submission_id": receipt.submission_id, "amount": receipt.amount_krw,
-                              "status": receipt.lint_status})
+                               "status": receipt.lint_status, "body_hash": body_hash(body)})
     )
     stream.write(f"revised {redact(item_id)} sid={redact(receipt.submission_id)} "
                  f"revision={receipt.revision} amount={receipt.amount_krw}\n")
     track_lint(submission_client, ledger, item_id=item_id, submission_id=receipt.submission_id,
-               body_sha256=digest, now=now)
+               body_sha256=digest, now=now, out=stream)
     return receipt
 
 
@@ -711,6 +722,8 @@ def run_withdraw(
     new_key: Callable[[], str] = _default_key,
     out: TextIO | None = None,
     clock: Callable[[], datetime] | None = None,
+    event: EventInfo | None = None,
+    event_provider: Callable[[], EventInfo] | None = None,
 ) -> Receipt | None:
     """Withdraw a submission guarded by its own approval."""
     stream = out if out is not None else sys.stdout
@@ -719,6 +732,8 @@ def run_withdraw(
         stream.write(f"would-withdraw {redact(submission_id)}\n")
         return None
     detail = submission_client.get_submission(submission_id)
+    if detail.state == "withdrawn":
+        raise ConfigError("[SYS] withdrawal target was withdrawn")
     if detail.item_id != item_id:
         raise ConfigError("[SYS] withdrawal product mismatch")
     digest = action_hash("withdraw", detail, body)
@@ -729,6 +744,11 @@ def run_withdraw(
                         body_sha256=digest, idempotency_key=None, data={"reasons": ["not_approved"]})
         )
         return None
+    resolved = event_provider() if event_provider is not None else event
+    if resolved is not None and (
+        resolved.phase.casefold() not in _OPEN_PHASES or not resolved.opens_at <= now < resolved.closes_at
+    ):
+        raise ConfigError("[SYS] withdrawal event changed")
     key = ledger.key_for("withdraw", item_id, digest, new_key)
     receipt = submission_client.withdraw(submission_id, idempotency_key=key)
     ledger.append(
@@ -737,6 +757,80 @@ def run_withdraw(
     )
     stream.write(f"withdrawn {redact(item_id)} sid={redact(receipt.submission_id)}\n")
     return receipt
+
+
+def _latest_lint_status(ledger: Ledger, submission_id: str) -> str | None:
+    status: str | None = None
+    for entry in ledger.entries():
+        if entry.kind == "lint" and entry.submission_id == submission_id:
+            raw = dict(entry.data).get("status")
+            if isinstance(raw, str):
+                status = raw
+    return status
+
+
+def run_action_batch(
+    kind: str,
+    targets: Sequence[tuple[str, str, Mapping[str, object], EvidenceBundle | None]],
+    *, submission_client: SubmissionClient, ledger: Ledger, now: datetime, ttl: timedelta,
+    execute: bool, pause_seconds: float, stop_after_consecutive_suspect: int,
+    fetch_price: Callable[[str], int | None], event_provider: Callable[[], EventInfo],
+    clock: Callable[[], datetime], sleep: Callable[[float], None] = time.sleep,
+    out: TextIO | None = None,
+) -> tuple[int, int]:
+    """Run approved revisions or withdrawals in order; returns (done, skipped)."""
+    if kind not in ("revise", "withdraw"):
+        raise ConfigError("[SYS] invalid batch kind")
+    stream = out if out is not None else sys.stdout
+    if not execute:
+        for _item_id, submission_id, _body, _bundle in targets:
+            stream.write(f"would-{kind} {redact(submission_id)}\n")
+        return 0, 0
+    done = 0
+    skipped = 0
+    consecutive_suspect = 0
+    total = len(targets)
+    for index, (item_id, submission_id, body, bundle) in enumerate(targets):
+        try:
+            if kind == "revise":
+                if bundle is None:
+                    skipped += 1
+                    continue
+                receipt = run_revise(
+                    submission_id, item_id, body, submission_client=submission_client,
+                    ledger=ledger, now=clock(), ttl=ttl, execute=True, bundle=bundle,
+                    fetch_price=fetch_price, event=event_provider(), clock=clock,
+                    event_provider=event_provider, out=stream,
+                )
+            else:
+                receipt = run_withdraw(
+                    submission_id, item_id, body, submission_client=submission_client,
+                    ledger=ledger, now=clock(), ttl=ttl, execute=True, clock=clock, out=stream,
+                    event_provider=event_provider,
+                )
+        except (ApiError, SubmissionPending) as exc:
+            if isinstance(exc, SubmissionPending):
+                return done, skipped
+            ledger.append(
+                LedgerEntry(at=clock(), kind="refused", item_id=item_id, submission_id=submission_id,
+                            body_sha256=None, idempotency_key=None, data={"reasons": [exc.code]})
+            )
+            if exc.code in _BATCH_STOP_CODES:
+                return done, skipped
+            skipped += 1
+            continue
+        if receipt is None:
+            skipped += 1
+        else:
+            done += 1
+            if kind == "revise":
+                status = _latest_lint_status(ledger, receipt.submission_id)
+                consecutive_suspect = consecutive_suspect + 1 if status == "suspect" else 0
+                if consecutive_suspect >= stop_after_consecutive_suspect:
+                    return done, skipped
+        if receipt is not None and index < total - 1 and pause_seconds:
+            sleep(pause_seconds)
+    return done, skipped
 
 
 def submission_for_item(ledger: Ledger, item_id: str) -> str | None:

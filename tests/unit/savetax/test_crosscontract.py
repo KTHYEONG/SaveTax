@@ -1337,3 +1337,42 @@ def test_required_unit_segments_are_never_truncated(tmp_path: Path) -> None:
         ds.close()
     assert bundle is None
     assert len(seen) == 1
+
+
+def test_own_item_rebuilt_only_when_allowed(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    ds, raw, fetch, _seen, detail, cand = _bundle_setup(
+        tmp_path,
+        {_detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울").listing_id:
+         _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울"),
+         _detail("222222222_0000000001", price="2508000", terms="서울", region="서울").listing_id:
+         _detail("222222222_0000000001", price="2508000", terms="서울", region="서울")},
+        {"222222222_0000000001": (200,
+         "단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+         "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음")},
+    )
+    mine = replace(detail, state=ItemState.CLAIMED_BY_ME)
+    try:
+        assert build_cross_bundle(cand, mine, ds, raw, fetch,  # type: ignore[arg-type]
+                                  _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(),
+                                  today=_TODAY) is None
+        got = build_cross_bundle(cand, mine, ds, raw, fetch,  # type: ignore[arg-type]
+                                 _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(),
+                                 today=_TODAY, allowed_states=frozenset({ItemState.CLAIMED_BY_ME}))
+        assert got is not None
+    finally:
+        ds.close()
+
+
+def test_foreign_claim_never_rebuilt(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    ds, raw, fetch, _seen, detail, cand = _bundle_setup(tmp_path, {}, {})
+    foreign = replace(detail, state=ItemState.CLAIMED)
+    try:
+        assert build_cross_bundle(cand, foreign, ds, raw, fetch,  # type: ignore[arg-type]
+                                  _evidence(), AuditConfig(), today=_TODAY,
+                                  allowed_states=frozenset({ItemState.CLAIMED_BY_ME})) is None
+    finally:
+        ds.close()

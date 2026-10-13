@@ -419,10 +419,11 @@ def build_cross_bundle(
     *,
     today: date,
     on_unit_conflict: Callable[[dict[str, str]], None] | None = None,
+    allowed_states: frozenset[ItemState] = frozenset({ItemState.AVAILABLE}),
     on_variant_result: Callable[[bool, int], None] | None = None,
 ) -> EvidenceBundle | None:
     """Return the bundle of admissible facts for one item, or None when the total is below the minimum."""
-    if detail.state is not ItemState.AVAILABLE:
+    if detail.state not in allowed_states:
         return None
     if detail.item_id != candidate.item_id:
         raise DataIntegrityError("[DATA] item detail identity mismatch")

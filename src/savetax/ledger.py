@@ -18,7 +18,7 @@ __all__ = ["Ledger", "LedgerEntry"]
 
 _KINDS = frozenset({"key", "drafted", "previewed", "approved", "submitted", "lint", "revised", "withdrawn", "refused"})
 _DATA_FIELDS = frozenset({"for_kind", "key", "kind", "note", "total", "lines", "item", "amount",
-                          "submission_id", "revision", "status", "held", "fact_ids", "verdicts", "hints", "reasons"})
+                          "submission_id", "revision", "status", "held", "fact_ids", "verdicts", "hints", "reasons", "body_hash"})
 
 
 @dataclass(frozen=True)
