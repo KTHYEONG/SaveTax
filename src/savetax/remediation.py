@@ -58,16 +58,19 @@ def plan_remediation(
     rebuilt: Mapping[str, tuple[Mapping[str, object], EvidenceBundle]],
     submitted_hashes: Mapping[str, str],
     previews: Mapping[str, PreviewResult],
-    unresolved: Collection[str] = frozenset(),
+    unresolved: Mapping[str, str] | Collection[str] = frozenset(),
 ) -> list[RemediationRow]:
     """Classify every active own submission; never raises for a single bad item."""
     import logging as _logging
 
     rows: list[RemediationRow] = []
-    unresolved_set = frozenset(unresolved)
+    if isinstance(unresolved, Mapping):
+        unresolved_map: Mapping[str, str] = dict(unresolved)
+    else:
+        unresolved_map = dict.fromkeys(unresolved, "series_unresolved")
     for detail in own:
         try:
-            row = _classify(detail, rebuilt, submitted_hashes, previews, unresolved_set)
+            row = _classify(detail, rebuilt, submitted_hashes, previews, unresolved_map)
         except Exception as exc:  # noqa: BLE001
             _logging.getLogger(__name__).info("[SUBMIT] remediation skip reason=%s", type(exc).__name__)
             continue
@@ -82,7 +85,7 @@ def _classify(
     rebuilt: Mapping[str, tuple[Mapping[str, object], EvidenceBundle]],
     submitted_hashes: Mapping[str, str],
     previews: Mapping[str, PreviewResult],
-    unresolved: frozenset[str] = frozenset(),
+    unresolved: Mapping[str, str] | None = None,
 ) -> RemediationRow | None:
     if detail.state == "withdrawn":
         return None
@@ -91,10 +94,11 @@ def _classify(
         return None
     entry = rebuilt.get(item)
     old_amount = detail.amount_krw
-    if item in unresolved and not _has_rebuilt_lines(entry):
+    unresolved_reason = unresolved.get(item) if unresolved else None
+    if unresolved_reason is not None and not _has_rebuilt_lines(entry):
         current = old_amount if isinstance(old_amount, int) else 0
         return RemediationRow(item, detail.submission_id, detail.revision, RemediationAction.KEEP,
-                              old_amount, current, None, 0, ("series_unresolved",))
+                              old_amount, current, None, 0, (unresolved_reason,))
     if entry is None:
         return RemediationRow(item, detail.submission_id, detail.revision, RemediationAction.WITHDRAW,
                               old_amount, 0, None, 0, ("no_admissible_line",))

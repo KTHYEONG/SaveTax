@@ -365,8 +365,9 @@ class EvidenceConfig:
         ShopSpec("www.comeontop.co.kr", "godomall"),
         ShopSpec("www.bipum.net", "godomall"),
     )
-    cross_markup_threshold: Decimal = Decimal("1.10")
+    cross_markup_threshold: Decimal = Decimal("1.20")
     retail_markup_threshold: Decimal = Decimal("1.10")
+    require_price_proof: bool = True
     min_item_expected_krw: int = 300_000
     max_benchmarks_per_item: int = 5
     region_all_token: str = "전지역"  # noqa: S105
@@ -479,6 +480,8 @@ class EvidenceConfig:
             threshold = getattr(self, threshold_name)
             if not threshold.is_finite() or threshold < 1:
                 raise ConfigError(f"[SYS] invalid {threshold_name}: must be finite and >= 1")
+        if not isinstance(self.require_price_proof, bool):
+            raise ConfigError("[SYS] invalid require_price_proof: must be a bool")
         for rate_name in ("install_allowance_rate",):
             rate = getattr(self, rate_name)
             if not rate.is_finite() or rate < 0:

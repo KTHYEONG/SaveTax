@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -15,8 +15,9 @@ from src.savetax.config import AuditConfig, EvidenceConfig, ListingSeries, UnitC
 from src.savetax.dataset import Dataset
 from src.savetax.errors import ApiError, DataIntegrityError, DomainValidationError
 from src.savetax.evidence import EvidenceBundle, Lane, LineProposal, PriceEvidence, RejectedFact, make_line
+from src.savetax.priceproof import PriceProof, PriceProofKind, price_in_effect, proof_note
 from src.savetax.publicweb import PublicFetcher, visible_text
-from src.savetax.rawapi import ListingDetail, RawApiClient
+from src.savetax.rawapi import DeliveryRow, ListingDetail, RawApiClient
 from src.savetax.redaction import redact
 from src.savetax.series import fact_series, group_series
 from src.savetax.units import UnitRelation, compare_units, reconcile_units
@@ -47,11 +48,74 @@ _SERIES_SCOPE_SENTENCE = "같은 물품식별번호가 한 계약 안에 제품 
 
 _SERIES_LABEL = {"general": "일반형", "seismic": "내진형"}
 
-_CLAIM = "납품요구 기록의 단가가 같은 물품식별번호의 다른 조달계약 단가보다 높게 나타난다."
-_COMPARISON_SCOPE = "같은 물품식별번호의 다른 조달계약 가운데 납품 조건이 같고 요청일에 유효하며 공급 지역이 포함되는 등재를 비교하였다."
-_REPRODUCTION_NOTES = (
-    "데이터셋 {version}과 원시 API 릴리스 {release}의 납품요구·계약 조건을 대조하고 공개 등재 화면의 단가를 확인하였다."
+def _claim(item_id: str) -> str:
+    return (
+        f"나라장터 종합쇼핑몰에 같은 물품식별번호({item_id})가 여러 조달계약으로 등재돼 있고 계약 단가가 다르다. "
+        "납품요구일에 계약 기간 중이었고 그 단가가 유효했던 다른 계약의 등재 단가를 비교 단가로 삼았다. "
+        "시중 판매가와 견주는 비교가 아니라, 주최 측 「자료와 방법」(https://savetax.now/method)이 분석 유형으로 둔 "
+        "「같은 물건, 다른 가격」에 해당하는 비교다. 납품요구 기록 기준이며 검수·지급 완료나 특정 업체·기관의 위법·의도를 뜻하지 않는다."
+    )
+
+
+_PROOF_SCOPE_CLAUSE = (
+    "비교 단가가 납품요구일에 유효"
+    "(비교 계약의 최종 변경계약일이 납품요구일 이전이거나 같은 계약단가의 납품요구 기록이 납품요구일 이전에 있음)"
 )
+
+_REPRODUCTION_NOTES_TEMPLATE = (
+    "[자료] 데이터셋 {version}, 원시 API 릴리스 {release}의 등재 조건(listings/{{id}})과 "
+    "납품요구 기록(listings/{{id}}/deliveries), 대회 물품 상세의 납품 사실. "
+    "비교 단가는 공개 등재 화면에서 다시 확인하였다. "
+    "[계산] 줄마다 예상액 = 납품요구 금액 − 비교 단가 × 수량(대회 산식). "  # noqa: RUF001
+    "[따른 기준] ① 분석 유형: 「자료와 방법」(https://savetax.now/method, 2026-10-13 확인) 7절 "
+    "\"같은 물품식별번호의 같은 제품인데 업체나 기관에 따라 값이 두세 배 다릅니다\", 8절 "
+    "\"같은 물품의 두 계약이 동시에 다른 값일 때만 「같은 물건, 다른 가격」으로 따로 적습니다\". "
+    "② 판정 기준: 같은 문서 2절 \"나라장터 납품요구 단가가 기준가의 1.2배 이상인 계약만 판정 목록에 넣습니다\", 4절 "
+    "\"시중 판매가나 같은 물건의 다른 계약 가격과 비교해 1.2배 이상으로 판정한 상세분석 수\". "
+    "③ 같은 물건: 대회 안내 \"같은 상품은 물품식별번호(item_id)로 판단합니다\""
+    "(https://hackathon.savetax.now/docs/README.md). "
+    "④ 조건: 「자료와 방법」 5절 \"단위·세금·배송·설치·보증 조건을 맞춘 주문에만 이 공식을 적용합니다\" "
+    "— 단위·세금은 납품 사실 값, 배송·설치는 납품 조건 일치로 맞추었고 보증 기간은 대조하지 않았다. "
+    "⑤ 같은 시점: 줄마다 비교 단가가 납품요구일에 유효했음을 비교 계약의 최종 변경계약일 또는 "
+    "같은 계약단가의 납품요구 기록으로 확인하였고 근거는 각 가격 근거의 메모에 적었다. "
+    "⑥ 같은 문서 8절 \"금액은 납품요구 기록 기준입니다\"."
+)
+
+_REPRODUCTION_NOTES_NO_PROOF_TEMPLATE = (
+    "[자료] 데이터셋 {version}, 원시 API 릴리스 {release}의 등재 조건(listings/{{id}})과 "
+    "납품요구 기록(listings/{{id}}/deliveries), 대회 물품 상세의 납품 사실. "
+    "비교 단가는 공개 등재 화면에서 다시 확인하였다. "
+    "[계산] 줄마다 예상액 = 납품요구 금액 − 비교 단가 × 수량(대회 산식). "  # noqa: RUF001
+    "[따른 기준] ① 분석 유형: 「자료와 방법」(https://savetax.now/method, 2026-10-13 확인) 7절 "
+    "\"같은 물품식별번호의 같은 제품인데 업체나 기관에 따라 값이 두세 배 다릅니다\", 8절 "
+    "\"같은 물품의 두 계약이 동시에 다른 값일 때만 「같은 물건, 다른 가격」으로 따로 적습니다\". "
+    "② 판정 기준: 같은 문서 2절 \"나라장터 납품요구 단가가 기준가의 1.2배 이상인 계약만 판정 목록에 넣습니다\", 4절 "
+    "\"시중 판매가나 같은 물건의 다른 계약 가격과 비교해 1.2배 이상으로 판정한 상세분석 수\". "
+    "③ 같은 물건: 대회 안내 \"같은 상품은 물품식별번호(item_id)로 판단합니다\""
+    "(https://hackathon.savetax.now/docs/README.md). "
+    "④ 조건: 「자료와 방법」 5절 \"단위·세금·배송·설치·보증 조건을 맞춘 주문에만 이 공식을 적용합니다\" "
+    "— 단위·세금은 납품 사실 값, 배송·설치는 납품 조건 일치로 맞추었고 보증 기간은 대조하지 않았다. "
+    "⑥ 같은 문서 8절 \"금액은 납품요구 기록 기준입니다\"."
+)
+
+
+def _format_threshold(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _comparison_scope(evidence: EvidenceConfig) -> str:
+    threshold = _format_threshold(evidence.cross_markup_threshold)
+    base = (
+        "같은 물품식별번호 · 같은 단위와 세금 기준(납품 사실 값 그대로) · 서로 다른 조달계약 · 납품 조건 동일 · "
+        "비교 등재의 공급 지역이 주문 등재의 공급 지역을 포함 · 납품요구일이 비교 등재의 계약 기간 안"
+    )
+    if evidence.require_price_proof:
+        base += f" · {_PROOF_SCOPE_CLAUSE}"
+    base += f" · 납품요구 단가가 비교 단가의 {threshold}배 이상인 줄만 포함."
+    return base
 
 _LABELS = (
     "단위",
@@ -429,6 +493,10 @@ def _quote(
     vendor_seg = f"공급 업체 {page.vendor_name}" if page.vendor_name else None
     period_seg = f"계약 기간 {page.contract_period}" if page.contract_period else None
     region_seg = f"공급 지역 {page.supply_region}" if page.supply_region else None
+    change_seg = f"변경 차수 {page.change_order}" if page.change_order else None
+    date_seg: str | None = None
+    if page.contract_date is not None:
+        date_seg = f"계약일 {page.contract_date.year}.{page.contract_date.month}.{page.contract_date.day}"
 
     def _assemble(include_period: bool, include_region: bool) -> str:
         parts: list[str] = []
@@ -441,6 +509,10 @@ def _quote(
             parts.append(vendor_seg)
         if period_seg and include_period:
             parts.append(period_seg)
+        if change_seg and include_period:
+            parts.append(change_seg)
+        if date_seg and include_period:
+            parts.append(date_seg)
         if page.delivery_terms:
             parts.append(f"납품 조건 {page.delivery_terms}")
         if region_seg and include_region:
@@ -664,6 +736,21 @@ def build_cross_bundle(
     unit_note_keys: set[tuple[str, str]] = set()
     conflict_keys: set[tuple[str, str, str]] = set()
     release = next((b.release for b in benchmarks if b.release), "자료 접근 대기")
+    delivery_cache: dict[str, Sequence[DeliveryRow] | None] = {}
+    proof_by_listing: dict[str, PriceProof] = {}
+    amended_count = 0
+    order_count = 0
+
+    def _rows_for(bench: ListingDetail) -> Sequence[DeliveryRow] | None:
+        key = bench.contract_no
+        if key in delivery_cache:
+            return delivery_cache[key]
+        try:
+            rows = raw.list_deliveries(bench.listing_id)
+        except (ApiError, DataIntegrityError):
+            rows = None
+        delivery_cache[key] = rows
+        return rows
     for fact in live_facts:
         fact_group = groups.get(fact.contract_no)
         if fact_group is None:
@@ -731,8 +818,10 @@ def build_cross_bundle(
         chosen: ListingDetail | None = None
         chosen_page: ListingPage | None = None
         chosen_rec = None
+        chosen_proof: PriceProof | None = None
         failure_reason = "no_admissible_benchmark"
         variant_blocked = False
+        proof_blocked = False
         while pool:
             admissible: list[ListingDetail] = []
             for b in pool:
@@ -757,10 +846,23 @@ def build_cross_bundle(
                     ):
                         variant_blocked = True
                         continue
+                if evidence.require_price_proof:
+                    assert fact.request_date is not None
+
+                    def _load(bench: ListingDetail = b) -> Sequence[DeliveryRow] | None:
+                        return _rows_for(bench)
+
+                    price_proof = price_in_effect(b, fact.request_date, _load)
+                    if price_proof is None:
+                        proof_blocked = True
+                        continue
+                    proof_by_listing[b.listing_id] = price_proof
                 admissible.append(b)
             if not admissible:
                 if variant_blocked and failure_reason == "no_admissible_benchmark":
                     failure_reason = "variant_unresolved"
+                elif proof_blocked and failure_reason == "no_admissible_benchmark":
+                    failure_reason = "benchmark_price_unproven"
                 break
             admissible.sort(key=lambda b: (b.price_krw, b.listing_id))
             top = admissible[0]
@@ -775,6 +877,7 @@ def build_cross_bundle(
                 chosen = top
                 chosen_page = cached
                 chosen_rec = _rec
+                chosen_proof = proof_by_listing.get(top.listing_id)
                 break
             url = evidence.listing_page_url_template.format(listing_id=top.listing_id)
             page = fetcher.get(url)
@@ -809,9 +912,21 @@ def build_cross_bundle(
                 if not pool:
                     rejected.append(RejectedFact(fact.fact_id, "page_price_mismatch"))
                 continue
+            if (
+                parsed.contract_date is not None
+                and top.contract_date is not None
+                and parsed.contract_date != top.contract_date
+            ):
+                failure_reason = "page_contract_date_mismatch"
+                page_failed.add(top.listing_id)
+                pool = [b for b in pool if b.listing_id != top.listing_id]
+                if not pool:
+                    rejected.append(RejectedFact(fact.fact_id, "page_contract_date_mismatch"))
+                continue
             chosen = top
             chosen_page = parsed
             page_cache[top.listing_id] = parsed
+            chosen_proof = proof_by_listing.get(top.listing_id)
             _display = parsed.unit_label if parsed.unit_label is not None else parsed.unit
             _rec = reconcile_units(fact.unit, top.unit, _display)
             if _rec.display_conflict and _display is not None:
@@ -848,20 +963,30 @@ def build_cross_bundle(
             _annotation = _probe.annotation
             _display_unit = _probe.display_unit
         try:
-            proof = PriceEvidence(
+            note: str | None = None
+            if chosen_proof is not None:
+                assert fact.request_date is not None
+                note = proof_note(chosen_proof, chosen, fact.request_date)
+            price_evidence = PriceEvidence(
                 source_url=url,
                 quote=_quote(chosen_page, today, fact.unit, _display_unit, _annotation),
                 observed_price_krw=int(chosen.price_krw),
                 observed_at=today,
                 vat_included=True,
                 shipping_included=True,
+                note=note,
             )
-            line = make_line(fact, chosen.price_krw, [proof])
+            line = make_line(fact, chosen.price_krw, [price_evidence])
         except DomainValidationError:
             rejected.append(RejectedFact(fact.fact_id, "no_admissible_benchmark"))
             continue
         lines.append(line)
         cited_ids.append(chosen.listing_id)
+        if chosen_proof is not None:
+            if chosen_proof.kind is PriceProofKind.AMENDED_BEFORE:
+                amended_count += 1
+            else:
+                order_count += 1
         if _annotation is not None and _display_unit is not None:
             _key = (chosen.listing_id, _display_unit)
             if _key not in unit_note_keys:
@@ -883,6 +1008,13 @@ def build_cross_bundle(
         len(rejected),
         total,
     )
+    logger.info(
+        "[EVIDENCE] item_id=%s price_proof amended=%d order=%d unproven=%d",
+        redact(candidate.item_id),
+        amended_count,
+        order_count,
+        sum(r.reason == "benchmark_price_unproven" for r in rejected),
+    )
     if series_mode:
         logger.info(
             "[EVIDENCE] item_id=%s series_resolved=%d series_unresolved=%d",
@@ -892,20 +1024,25 @@ def build_cross_bundle(
         )
     if lines and total < evidence.min_item_expected_krw:
         return None
-    if not lines and not any(r.reason in ("unit_display_conflict", "variant_unresolved") for r in rejected):
+    if not lines and not any(
+        r.reason in ("unit_display_conflict", "variant_unresolved", "benchmark_price_unproven")
+        for r in rejected
+    ):
         return None
     ratios = [line.fact_unit_price_krw / line.benchmark_unit_price_krw for line in lines]
     title = (
         f"같은 물품의 다른 계약 단가 대비 {max(ratios):.2f}배" if ratios
         else "변형 구분 불확실로 비교 제외" if any(r.reason == "variant_unresolved" for r in rejected)
+        else "비교 단가 유효 시점 미확인으로 비교 제외" if any(r.reason == "benchmark_price_unproven" for r in rejected)
         else "단위 표기 충돌로 비교 제외"
     )
     if series_mode:
         release = next((b.release for b in series_fetched if b.release), "자료 접근 대기")
-    notes = _REPRODUCTION_NOTES.format(version=dataset.version, release=release)
-    comparison_scope = _COMPARISON_SCOPE
+    template = _REPRODUCTION_NOTES_TEMPLATE if evidence.require_price_proof else _REPRODUCTION_NOTES_NO_PROOF_TEMPLATE
+    notes = template.format(version=dataset.version, release=release)
+    comparison_scope = _comparison_scope(evidence)
     if use_variant_gate and variant_bearing:
-        comparison_scope = f"{_COMPARISON_SCOPE} {_VARIANT_SCOPE_SENTENCE}"
+        comparison_scope = f"{comparison_scope} {_VARIANT_SCOPE_SENTENCE}"
         cited: dict[str, str] = {}
         for match_id in cited_ids:
             match_contract = lid_to_contract.get(match_id)
@@ -921,7 +1058,7 @@ def build_cross_bundle(
                 f"({prices[0]:,f}원 ~ {prices[-1]:,f}원), 최고가 {cited[cited_contract]} 사용"
             )
     elif series_mode:
-        comparison_scope = f"{_COMPARISON_SCOPE} {_SERIES_SCOPE_SENTENCE}"
+        comparison_scope = f"{comparison_scope} {_SERIES_SCOPE_SENTENCE}"
         cited = {}
         for match_id in cited_ids:
             match_contract = lid_to_contract.get(match_id)
@@ -935,7 +1072,7 @@ def build_cross_bundle(
         item_id=candidate.item_id,
         lane=Lane.CROSS_CONTRACT,
         title=title,
-        claim=_CLAIM,
+        claim=_claim(candidate.item_id),
         comparison_scope=comparison_scope,
         reproduction_notes=notes,
         lines=tuple(lines),

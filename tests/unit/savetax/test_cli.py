@@ -988,12 +988,12 @@ def _evidence_rows() -> list[dict[str, Any]]:
         _base_row(
             listing_id="111111111_0000000001",
             item_id="11111111",
-            price=2760000,
+            price=3100000,
             dlv_key=1,
             dlv_lines=1,
             dlv_qty=2,
             dlv_unit="대",
-            dlv_amount=5520000,
+            dlv_amount=6200000,
         ),
         _base_row(
             listing_id="222222222_0000000001",
@@ -1025,9 +1025,9 @@ def _evidence_fact(state: str = "available") -> dict:
         "tax_basis": "vat_included",
         "basis_id": "basis:대:vat_included",
         "period_kind": "none",
-        "unit_price_krw": "2760000",
+        "unit_price_krw": "3100000",
         "quantity": "2",
-        "comparable_amount_krw": "5520000",
+        "comparable_amount_krw": "6200000",
         "scorable": True,
         "exclusion_reasons": [],
     }
@@ -1062,6 +1062,7 @@ def _evidence_listing_body(listing_id: str, contract_no: str, price: str, terms:
             "supplyRegion": region,
             "vendor": {"name": "v"},
             "contract": {"no": contract_no, "beginYmd": "20250101", "endYmd": "20261231"},
+            "contractTerms": {"contractDate": "20251001", "changeOrder": "1"},
         },
         "meta": {"release": "rtest"},
     }
@@ -1105,7 +1106,7 @@ def _evidence_transport(calls: list, *, item_state: str = "available", fail: str
                 raise OSError("dns fail")
             return _resp(200, _evidence_item_body(item_id, item_state))
         if "/listings/111111111_0000000001" in url:
-            return _resp(200, _evidence_listing_body("111111111_0000000001", "111111111_0", "2760000"))
+            return _resp(200, _evidence_listing_body("111111111_0000000001", "111111111_0", "3100000"))
         if "/listings/222222222_0000000001" in url:
             return _resp(200, _evidence_listing_body("222222222_0000000001", "222222222_0", "2508000"))
         if "savetax.now/listing/" in url:
@@ -1150,7 +1151,7 @@ def test_evidence_limit_bounds_detail_calls(tmp_path: Path) -> None:
     rows: list[dict[str, Any]] = []
     for i in range(3):
         item = f"1111111{i}"
-        rows.append(_base_row(item_id=item, listing_id=f"11111111{i}_0000000001", dlv_key=10 + i, dlv_amount=5520000, dlv_qty=2, price=2760000))
+        rows.append(_base_row(item_id=item, listing_id=f"11111111{i}_0000000001", dlv_key=10 + i, dlv_amount=6200000, dlv_qty=2, price=3100000))
         rows.append(
             _base_row(
                 listing_id=f"22222222{i}_0000000001",
@@ -1196,7 +1197,7 @@ def test_evidence_limit_bounds_detail_calls(tmp_path: Path) -> None:
             lid = url.rsplit("/", 1)[-1]
             if lid.startswith("11111111"):
                 return _resp(200, {
-                    "data": {"id": lid, "itemId": lid[:8] if False else "x", "unit": "대", "price": "2760000",
+                    "data": {"id": lid, "itemId": lid[:8] if False else "x", "unit": "대", "price": "3100000",
                              "priceKind": "contract", "deliveryTerms": "서울", "supplyRegion": "서울",
                              "vendor": {"name": "v"}, "contract": {"no": "111111111", "beginYmd": "20250101", "endYmd": "20261231"}},
                     "meta": {"release": "rtest"},
@@ -1641,7 +1642,7 @@ def test_evidence_all_lane_writes_both_bundles(tmp_path: Path) -> None:
 
 def test_all_lane_drafts_do_not_overwrite_cross_evidence(tmp_path: Path) -> None:
     rows = _evidence_rows()
-    rows[0]["dlv_amount"] = 27600000
+    rows[0]["dlv_amount"] = 31000000
     rows[0]["dlv_qty"] = 10
     data_dir = _write_dataset(tmp_path, rows)
     out_dir = tmp_path / "out"
@@ -1722,7 +1723,7 @@ def _conflict_transport(calls: list, *, fact_unit: str = "조", raw_unit: str = 
             body["facts"][0]["unit"] = fact_unit
             return _resp(200, body)
         if "/listings/111111111_0000000001" in url:
-            body = _evidence_listing_body("111111111_0000000001", "111111111_0", "2760000")
+            body = _evidence_listing_body("111111111_0000000001", "111111111_0", "3100000")
             body["data"]["unit"] = fact_unit
             return _resp(200, body)
         if "/listings/222222222_0000000001" in url:
@@ -1861,7 +1862,7 @@ def test_conflict_audit_preserves_whitespace_and_appends(tmp_path: Path, policy:
 
 def test_conflict_audit_survives_later_network_failure(tmp_path: Path, caplog: Any) -> None:
     rows = _evidence_rows()
-    rows[0]["dlv_amount"] = 27600000
+    rows[0]["dlv_amount"] = 31000000
     rows[0]["dlv_qty"] = 10
     data_dir = _write_dataset(tmp_path, rows)
     out = tmp_path / "out"
@@ -1883,9 +1884,9 @@ def test_conflict_audit_survives_bundle_threshold(tmp_path: Path, monkeypatch: A
     import src.savetax.cli as cli
     from src.savetax.config import EvidenceConfig
 
-    monkeypatch.setattr(cli, "EvidenceConfig", lambda: EvidenceConfig(min_item_expected_krw=1_000_000))
+    monkeypatch.setattr(cli, "EvidenceConfig", lambda: EvidenceConfig(min_item_expected_krw=2_000_000))
     rows = _evidence_rows()
-    rows[0]["dlv_amount"] = 27600000
+    rows[0]["dlv_amount"] = 31000000
     rows[0]["dlv_qty"] = 10
     data_dir = _write_dataset(tmp_path, rows)
     out = tmp_path / "out"

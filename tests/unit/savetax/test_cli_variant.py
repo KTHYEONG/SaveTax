@@ -72,7 +72,7 @@ def _write(tmp_path: Path) -> Path:
         _row("222222222_0000000001", 2100000),
         _row("222222222_0000000002", 4510000),
         _row("333333333_0000000001", 3000000),
-        _row("444444444_0000000001", 5200000, dlv_key=7, amount=10400000, qty=2),
+        _row("444444444_0000000001", 5200000, dlv_key=7, amount=12000000, qty=2),
     ]
     con = duckdb.connect()
     try:
@@ -113,6 +113,7 @@ def _listing_body(lid: str, price: str, contract: str) -> dict:
             "supplyRegion": "서울",
             "vendor": {"name": "v"},
             "contract": {"no": contract, "beginYmd": "20250101", "endYmd": "20261231"},
+            "contractTerms": {"contractDate": "20251001", "changeOrder": "1"},
         },
         "meta": {"release": "rtest"},
     }
@@ -126,7 +127,7 @@ def _page(lid: str, price: str) -> bytes:
     ).encode()
 
 
-def _transport(calls: list, fact_price: str = "5200000") -> Any:
+def _transport(calls: list, fact_price: str = "5600000") -> Any:
     def run(url: str, headers: object, timeout: float) -> HttpResponse:
         calls.append(url)
         if url.endswith("/events/current/me"):
@@ -248,7 +249,7 @@ def test_variant_summary_is_logged(tmp_path: Path, caplog: Any) -> None:
             ["evidence", "--out-dir", str(out), "--data-dir", str(data_dir),
              "--variant-policy", "allow_low_fact"],
             environ={"SAVETAX_TOKEN": TOKEN},
-            transport=_transport(calls, fact_price="5200000"),  # type: ignore[arg-type]
+            transport=_transport(calls, fact_price="5600000"),  # type: ignore[arg-type]
         )
     assert code == 0
     assert "variant_unresolved=1" in caplog.text
@@ -298,9 +299,9 @@ def _owned_series_transport(calls: list) -> Any:
         if "/listings/122010318_1070000300" in url:
             return _resp(200, _listing_body("122010318_1070000300", "2000000", "122010318_1"))
         if "/listings/122010318_1070000700" in url:
-            return _resp(200, _listing_body("122010318_1070000700", "2400000", "122010318_1"))
+            return _resp(200, _listing_body("122010318_1070000700", "2200000", "122010318_1"))
         if "savetax.now/listing/122010318_1070000700" in url:
-            return HttpResponse(status=200, headers={}, body=_page("122010318_1070000700", "2,400,000"),
+            return HttpResponse(status=200, headers={}, body=_page("122010318_1070000700", "2,200,000"),
                                 elapsed_seconds=0.01)
         if "savetax.now/listing/" in url:
             return HttpResponse(status=404, headers={}, body=b"", elapsed_seconds=0.01)
@@ -317,7 +318,7 @@ def _write_owned_series(tmp_path: Path) -> Path:
         _row("331930619_1190000234", 2508000),
         _row("331930619_1190000455", 2736000, dlv_key=7, amount=5472000, qty=2),
         _row("122010318_1070000300", 2000000),
-        _row("122010318_1070000700", 2400000),
+        _row("122010318_1070000700", 2200000),
     ]
     con = duckdb.connect()
     try:
@@ -359,14 +360,14 @@ def test_owned_rebuild_honours_the_series_policy(tmp_path: Path) -> None:
     assert "122010318_1070000300" not in quote
     assert "122010318_1070000300" not in " ".join(body["caveats"])
     draft = json.loads((out / "remediation" / "drafts" / f"{_ITEM}.json").read_text(encoding="utf-8"))
-    assert draft["lines"][0]["benchmark_unit_price_krw"] == "2400000"
+    assert draft["lines"][0]["benchmark_unit_price_krw"] == "2200000"
 
 
 def test_series_unresolved_parses_remediation_bundles(tmp_path: Path) -> None:
     from src.savetax.cli import _series_unresolved
     from src.savetax.errors import DataIntegrityError
 
-    assert _series_unresolved(tmp_path) == frozenset()
+    assert _series_unresolved(tmp_path) == {}
     rem = tmp_path / "remediation"
     rem.mkdir(parents=True, exist_ok=True)
     (rem / "cross-bundles.jsonl").mkdir(parents=False, exist_ok=True)
@@ -382,7 +383,7 @@ def test_series_unresolved_parses_remediation_bundles(tmp_path: Path) -> None:
                       "rejected": [{"fact_id": "F1", "reason": "no_admissible_benchmark"}]}) + "\n",
         encoding="utf-8",
     )
-    assert _series_unresolved(tmp_path) == frozenset({"A"})
+    assert _series_unresolved(tmp_path) == {"A": "series_unresolved"}
 
 
 @pytest.mark.parametrize("payload", ["{bad json", "[1, 2]", '{"item_id": "A", "lines": []}'])

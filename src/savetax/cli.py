@@ -789,7 +789,7 @@ def _read_plan_rows(plan_path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _series_unresolved(evidence_dir: Path) -> frozenset[str]:
+def _series_unresolved(evidence_dir: Path) -> dict[str, str]:
     import json as _json
 
     from src.savetax.errors import DataIntegrityError
@@ -798,10 +798,10 @@ def _series_unresolved(evidence_dir: Path) -> frozenset[str]:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return frozenset()
+        return {}
     except (OSError, UnicodeError):
         raise DataIntegrityError("[DATA] remediation bundles cannot be read") from None
-    unresolved: set[str] = set()
+    unresolved: dict[str, str] = {}
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -820,15 +820,13 @@ def _series_unresolved(evidence_dir: Path) -> frozenset[str]:
             or any(not isinstance(r, dict) or not isinstance(r.get("reason"), str) for r in rejected)
         ):
             raise DataIntegrityError("[DATA] malformed remediation bundle")
-        if (
-            isinstance(item, str)
-            and isinstance(lines, list)
-            and not lines
-            and isinstance(rejected, list)
-            and any(isinstance(r, dict) and r.get("reason") == "variant_unresolved" for r in rejected)
-        ):
-            unresolved.add(item)
-    return frozenset(unresolved)
+        if isinstance(item, str) and isinstance(lines, list) and not lines and isinstance(rejected, list):
+            reasons = {r.get("reason") for r in rejected if isinstance(r, dict)}
+            if "variant_unresolved" in reasons:
+                unresolved[item] = "series_unresolved"
+            elif "benchmark_price_unproven" in reasons:
+                unresolved[item] = "price_unproven"
+    return unresolved
 
 
 def _compute_remediation(

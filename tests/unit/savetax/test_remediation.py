@@ -216,3 +216,23 @@ def test_broken_bundle_with_unresolved_flag_is_kept() -> None:
     rows = plan_remediation([_detail()], {"11111111": (_body(), _Bad())}, {}, {}, {"11111111"})  # type: ignore[dict-item]
     assert rows[0].action is RemediationAction.KEEP
     assert rows[0].reasons == ("preview_not_admissible",)
+
+
+def test_unproven_price_is_kept_not_withdrawn() -> None:
+    rows = plan_remediation([_detail()], {}, {}, {}, {"11111111": "price_unproven"})
+    assert len(rows) == 1
+    assert rows[0].action is RemediationAction.KEEP
+    assert rows[0].reasons == ("price_unproven",)
+    assert rows[0].new_amount_krw == 2000
+
+
+def test_plain_collection_still_means_series() -> None:
+    rows = plan_remediation([_detail()], {}, {}, {}, frozenset({"11111111"}))
+    assert rows[0].action is RemediationAction.KEEP
+    assert rows[0].reasons == ("series_unresolved",)
+
+
+def test_proven_absence_of_line_is_still_withdrawal_candidate() -> None:
+    rows = plan_remediation([_detail()], {}, {}, {}, {})
+    assert rows[0].action is RemediationAction.WITHDRAW
+    assert rows[0].reasons == ("no_admissible_line",)

@@ -130,6 +130,7 @@ def _detail(
     contract_no: str,
     terms: str = "서울",
     region: str = "서울",
+    contract_date: date | None = _REQUEST,
 ) -> ListingDetail:
     return ListingDetail(
         listing_id=lid,
@@ -148,15 +149,26 @@ def _detail(
         delivery_terms=terms,
         supply_region=region,
         release="rtest",
+        contract_date=contract_date,
     )
 
 
 class _FakeRaw:
-    def __init__(self, mapping: dict[str, ListingDetail | None]) -> None:
+    def __init__(
+        self,
+        mapping: dict[str, ListingDetail | None],
+        deliveries: dict[str, tuple | None] | None = None,
+    ) -> None:
         self.mapping = mapping
+        self.deliveries = deliveries or {}
+        self.delivery_calls: list[str] = []
 
     def get_listing(self, listing_id: str) -> ListingDetail | None:
         return self.mapping.get(listing_id)
+
+    def list_deliveries(self, listing_id: str):  # type: ignore[no-untyped-def]
+        self.delivery_calls.append(listing_id)
+        return self.deliveries.get(listing_id)
 
 
 def _fetcher(pages: dict[str, tuple[int, str]]) -> PublicFetcher:
@@ -244,6 +256,7 @@ def _raw_map(**over: str | None) -> dict[str, ListingDetail | None]:
                 delivery_terms=base.delivery_terms,
                 supply_region=base.supply_region,
                 release=base.release,
+                contract_date=base.contract_date,
             )
     return mapping
 
@@ -423,6 +436,7 @@ def test_non_variant_item_has_no_caveat(tmp_path: Path) -> None:
         delivery_terms="서울",
         supply_region="서울",
         release="rtest",
+        contract_date=_REQUEST,
     )
     try:
         bundle = build_cross_bundle(
@@ -544,6 +558,7 @@ def test_window_still_applies_to_representative(tmp_path: Path) -> None:
         delivery_terms=base.delivery_terms,
         supply_region=base.supply_region,
         release=base.release,
+        contract_date=base.contract_date,
     )
     try:
         bundle = build_cross_bundle(

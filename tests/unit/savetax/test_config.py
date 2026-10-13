@@ -194,7 +194,8 @@ def _evidence(**over: object) -> EvidenceConfig:
 
 def test_evidence_defaults_are_valid() -> None:
     cfg = EvidenceConfig()
-    assert cfg.cross_markup_threshold == Decimal("1.10")
+    assert cfg.cross_markup_threshold == Decimal("1.20")
+    assert cfg.require_price_proof is True
     assert cfg.min_item_expected_krw == 300000
     hosts = cfg.public_hosts()
     for host in ("savetax.now", "prod.danawa.com", "search.danawa.com", "itncctv.kr"):
@@ -204,6 +205,11 @@ def test_evidence_defaults_are_valid() -> None:
 def test_evidence_threshold_below_one_is_rejected() -> None:
     with pytest.raises(ConfigError):
         _evidence(cross_markup_threshold=Decimal("0.99"))
+
+
+def test_non_boolean_proof_flag_is_refused() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(require_price_proof="yes")  # type: ignore[arg-type]
 
 
 def test_evidence_template_without_placeholder_is_rejected() -> None:

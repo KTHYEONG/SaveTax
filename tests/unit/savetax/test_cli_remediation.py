@@ -578,3 +578,52 @@ def test_remediate_run_guards_and_withdraw(tmp_path, monkeypatch, capsys):
     code2 = main(["remediate", "run", "--kind", "revise", "--limit", "1"],  # type: ignore[arg-type]
                  environ={"SAVETAX_TOKEN": TOKEN}, transport=read, write_transport=write)
     assert code2 == 0
+
+
+def test_zero_line_reasons_are_mapped(tmp_path: Path) -> None:
+    from src.savetax.cli import _series_unresolved
+    from src.savetax.remediation import plan_remediation
+    from src.savetax.submissions import SubmissionDetail
+
+    rem = tmp_path / "remediation"
+    rem.mkdir(parents=True, exist_ok=True)
+    (rem / "cross-bundles.jsonl").write_text(
+        json.dumps({"item_id": "A", "lines": [],
+                    "rejected": [{"fact_id": "F1", "reason": "variant_unresolved"}]}) + "\n"
+        + json.dumps({"item_id": "B", "lines": [],
+                      "rejected": [{"fact_id": "F1", "reason": "benchmark_price_unproven"}]}) + "\n",
+        encoding="utf-8",
+    )
+    mapped = _series_unresolved(tmp_path)
+    assert mapped == {"A": "series_unresolved", "B": "price_unproven"}
+    own = [SubmissionDetail(f"SID-{i}", item, "accepted", 2, 100, False, "clean", (), ())
+           for i, item in enumerate(("A", "B"))]
+    rows = plan_remediation(own, {}, {}, {}, mapped)
+    assert all(r.action.value == "keep" for r in rows)
+    assert {r.item_id: r.reasons for r in rows} == {
+        "A": ("series_unresolved",), "B": ("price_unproven",)}
+
+
+def test_unresolved_zero_lines_never_enter_withdraw_challenge(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.chdir(tmp_path)
+    rem = tmp_path / "scratch" / "evidence" / "remediation"
+    (rem / "drafts").mkdir(parents=True)
+    bundles = []
+    for item, reason in (("11111111", "variant_unresolved"), ("22222222", "benchmark_price_unproven")):
+        bundle = _bundle_line(item)
+        bundle.update(lines=[], expected_total_krw=0, rejected=[{"fact_id": "F1", "reason": reason}])
+        bundles.append(bundle)
+    (rem / "cross-bundles.jsonl").write_text(
+        "".join(json.dumps(bundle) + "\n" for bundle in bundles), encoding="utf-8",
+    )
+    posts: list = []
+    read, write = _remediate_transports([], posts, [("SID1", "11111111"), ("SID2", "22222222")])
+    assert main(["remediate", "plan"], environ={"SAVETAX_TOKEN": TOKEN}, transport=read, write_transport=write) == 0
+    rows = [json.loads(line) for line in (rem / "plan.jsonl").read_text().splitlines()]
+    assert {row["item_id"]: row["reasons"] for row in rows} == {
+        "11111111": ["series_unresolved"], "22222222": ["price_unproven"],
+    }
+    assert all(row["action"] == "keep" for row in rows)
+    assert all(row["new_amount_krw"] == 2000 for row in rows)
+    assert "withdraw challenge=" not in capsys.readouterr().out
+    assert posts == []

@@ -118,6 +118,8 @@ def _detail(
     begin: str | None = "20250101",
     end: str | None = "20261231",
     kind: str = "contract",
+    contract_date: date | None = _REQUEST,
+    change_order: str | None = None,
 ) -> ListingDetail:
     return ListingDetail(
         listing_id=listing_id,
@@ -136,17 +138,31 @@ def _detail(
         delivery_terms=terms,
         supply_region=region,
         release="rtest",
+        contract_date=contract_date,
+        change_order=change_order,
     )
 
 
 class _FakeRaw:
-    def __init__(self, mapping: dict[str, ListingDetail | None]) -> None:
+    def __init__(
+        self,
+        mapping: dict[str, ListingDetail | None],
+        deliveries: dict[str, tuple | None] | None = None,
+    ) -> None:
         self.mapping = mapping
         self.calls: list[str] = []
+        self.delivery_calls: list[str] = []
+        self.deliveries = deliveries or {}
 
     def get_listing(self, listing_id: str) -> ListingDetail | None:
         self.calls.append(listing_id)
         return self.mapping.get(listing_id)
+
+    def list_deliveries(self, listing_id: str):  # type: ignore[no-untyped-def]
+        self.delivery_calls.append(listing_id)
+        if listing_id in self.deliveries:
+            return self.deliveries[listing_id]
+        return None
 
 
 def _fetcher(pages: dict[str, tuple[int, str]], seen: list) -> PublicFetcher:
@@ -282,8 +298,8 @@ def test_threshold_boundary_is_inclusive(tmp_path: Path) -> None:
         finally:
             ds.close()
 
-    assert run(11_000_000) == 1
-    assert run(10_999_990) == 0
+    assert run(12_000_000) == 1
+    assert run(11_999_990) == 0
 
 
 def test_different_unit_is_excluded(tmp_path: Path) -> None:
@@ -1028,7 +1044,7 @@ def test_html_confirmation_is_cached_and_price_is_exact(tmp_path: Path, price: s
         tmp_path, {order.listing_id: order, bench.listing_id: bench}, {bench.listing_id: (200, html)}, facts=facts,
     )
     try:
-        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
     finally:
         ds.close()
     if price == "2508000":
@@ -1413,7 +1429,7 @@ def _spage(lid: str, price: str) -> tuple[int, str]:
 
 
 def _sdetail(lid: str, price: str, contract: str) -> ListingDetail:
-    return _detail(lid, price=price, contract_no=contract, terms="서울", region="서울")
+    return _detail(lid, price=price, contract_no=contract, terms="서울", region="서울", contract_date=_REQUEST)
 
 
 def _series_setup(
