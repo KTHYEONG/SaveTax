@@ -428,3 +428,67 @@ def test_agency_listings_cap_rejects_bool() -> None:
 def test_agency_scope_flag_must_be_bool() -> None:
     with pytest.raises(ConfigError):
         _evidence(agency_request_scope=1)  # type: ignore[arg-type]
+
+
+def test_unsorted_rack_classes_rejected() -> None:
+    from src.savetax.config import RackClass
+
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=(RackClass(1400, "rack:1400", 1), RackClass(1200, "rack:1200", 1)))
+
+
+def test_unknown_rack_part_key_rejected() -> None:
+    from src.savetax.config import RackClass
+
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=(RackClass(1200, "rack:unknown", 1),))
+    with pytest.raises(ConfigError):
+        _evidence(panel_part_key="unknown")
+
+
+def test_non_positive_rack_floor_rejected() -> None:
+    from src.savetax.config import RackClass
+
+    with pytest.raises(ConfigError):
+        _evidence(panel_floor_krw=0)
+    with pytest.raises(ConfigError):
+        _evidence(panel_floor_unterminated_krw=-1)
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=(RackClass(1200, "rack:1200", 0),))
+
+
+def test_bad_rack_exclusion_pattern_rejected() -> None:
+    from src.savetax.config import RackClass
+
+    with pytest.raises(ConfigError):
+        _evidence(rack_exclusion_pattern="([")
+    with pytest.raises(ConfigError):
+        _evidence(rack_width_mm=(650, 550))
+    with pytest.raises(ConfigError):
+        _evidence(rack_max_depth_mm=0)
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=())
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=("nope",))  # type: ignore[list-item]
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=(RackClass(0, "rack:1200", 1),))
+
+
+@pytest.mark.parametrize("over", [
+    {"rack_classes": None},
+    {"rack_width_mm": None},
+    {"rack_width_mm": (550,)},
+    {"rack_exclusion_pattern": None},
+    {"rack_exclusion_pattern": b"server"},
+    {"panel_part_key": []},
+])
+def test_fixture_invalid_field_types_raise_config_error(over) -> None:
+    with pytest.raises(ConfigError):
+        _evidence(**over)
+
+
+def test_rack_part_key_type_raises_config_error() -> None:
+    from src.savetax.config import RackClass
+
+    with pytest.raises(ConfigError):
+        _evidence(rack_classes=(RackClass(1200, [], 563310),))

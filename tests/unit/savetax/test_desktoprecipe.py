@@ -205,7 +205,8 @@ def test_only_desktop_adders_selected_and_spec_rows_use_labels() -> None:
     ev = _evidence()
     recipe = desktop_recipe(_attrs(), _evidence(recipe_adders=(*ev.recipe_adders, RecipeAdder("other", "공임", 100, "basis"))))
     assert not isinstance(recipe, str)
-    assert recipe.adders == ev.recipe_adders
+    assert [a.key for a in recipe.adders] == ["desktop:assembly", "desktop:reader"]
+    assert all(a in ev.recipe_adders for a in recipe.adders)
     assert recipe.spec_rows[0][2] == "CPU"
     with pytest.raises(ConfigError, match="desktop adders missing"):
         desktop_recipe(_attrs(), _evidence(recipe_adders=()))

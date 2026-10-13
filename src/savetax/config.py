@@ -22,7 +22,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["DEFAULT_RECIPE_ADDERS", "DEFAULT_RECIPE_PARTS", "DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "EvidenceConfig", "ListingSeries", "RecipeAdder", "RecipePart", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
+__all__ = ["DEFAULT_RACK_CLASSES", "DEFAULT_RECIPE_ADDERS", "DEFAULT_RECIPE_PARTS", "DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "EvidenceConfig", "ListingSeries", "RackClass", "RecipeAdder", "RecipePart", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
 
 
 class Secret:
@@ -332,6 +332,24 @@ DEFAULT_SERIES_BLOCKS: tuple[SeriesBlock, ...] = (
 
 
 @dataclass(frozen=True)
+class RackClass:
+    """Reference rack for procurement racks up to a height; floor is the organizer's highest published B of the class."""
+
+    max_height_mm: int
+    part_key: str
+    floor_krw: int
+
+
+DEFAULT_RACK_CLASSES: tuple["RackClass", ...] = (  # noqa: UP037
+    RackClass(1200, "rack:1200", 563_310),
+    RackClass(1400, "rack:1400", 696_310),
+    RackClass(1600, "rack:1600", 937_310),
+    RackClass(1800, "rack:1800", 866_310),
+    RackClass(2000, "rack:2000", 965_310),
+)
+
+
+@dataclass(frozen=True)
 class RecipePart:
     """One reference product of a recipe: Danawa catalogue code and the tokens its page name must contain."""
 
@@ -370,11 +388,20 @@ DEFAULT_RECIPE_PARTS: tuple["RecipePart", ...] = (  # noqa: UP037
     RecipePart("case:tower", "케이스", "33990908", ("TA20",)),
     RecipePart("case:slim", "케이스", "34740608", ("미니멀",)),
     RecipePart("kbm", "키보드·마우스", "21206318", ("KM", "C1")),
+    RecipePart("panel:24", "24포트 패치판넬(CAT.6A)", "35026826", ("IN-50U6A24P", "24포트")),
+    RecipePart("rack:1200", "허브랙 22U", "75600215", ("LD-SGDR750", "H1200")),
+    RecipePart("rack:1400", "허브랙 27U", "75600224", ("LD-SGDR750", "H1400")),
+    RecipePart("rack:1600", "허브랙 31U", "75600230", ("LD-SGDR750", "H1600")),
+    RecipePart("rack:1800", "허브랙 36U", "75600233", ("LD-SGDR750", "H1800")),
+    RecipePart("rack:2000", "허브랙 40U", "75600236", ("LD-SGDR750", "H2000")),
 )
 
 DEFAULT_RECIPE_ADDERS: tuple["RecipeAdder", ...] = (  # noqa: UP037
     RecipeAdder("desktop:assembly", "조립비", 25000, "주최 측 데스크톱 판정의 조립비(https://savetax.now/405)"),
     RecipeAdder("desktop:reader", "카드리더", 5600, "주최 측 데스크톱 판정의 카드리더 가격(https://savetax.now/405)"),
+    RecipeAdder("panel:labor-terminated", "성단·설치 공임", 401649, "정보통신 표준품셈 4-3-3 패치판넬 24포트 성단·설치·결선 공임(부가세 포함), 주최 측 판정 https://savetax.now/222"),
+    RecipeAdder("panel:labor-mounted", "설치 공임", 79164, "정보통신 표준품셈 4-3-3 조립된 패치판넬 24포트 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/621"),
+    RecipeAdder("rack:labor", "랙 설치 공임", 167310, "정보통신 표준품셈 4-3-3 고정형 19인치 랙 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/176"),
 )
 
 _PCODE_RE = re.compile(r"^\d{1,12}$")
@@ -552,6 +579,15 @@ class EvidenceConfig:
     desktop_category: str = "데스크톱컴퓨터"
     desktop_delivery_terms: tuple[str, ...] = ("납품장소도",)
     desktop_os_optional_values: tuple[str, ...] = ("옵션제공", "옵션 제공", "선택", "옵션품목(복구솔루션)")
+    panel_category: str = "랙캐비닛용패널"
+    panel_part_key: str = "panel:24"
+    panel_floor_krw: int = 467_649
+    panel_floor_unterminated_krw: int = 145_164
+    rack_category: str = "네트워크시스템장비용랙"
+    rack_classes: tuple["RackClass", ...] = DEFAULT_RACK_CLASSES  # noqa: UP037
+    rack_width_mm: tuple[int, int] = (550, 650)
+    rack_max_depth_mm: int = 750
+    rack_exclusion_pattern: str = r"내진|서버|방음|항온|냉방|옥외|벽부|UPS|배터리|CCTV|방진|이동형"
 
     def __post_init__(self) -> None:
         try:
@@ -646,6 +682,43 @@ class EvidenceConfig:
         object.__setattr__(self, "desktop_os_optional_values", tuple(self.desktop_os_optional_values))
         object.__setattr__(self, "agency_island_tokens", tuple(self.agency_island_tokens))
         object.__setattr__(self, "agency_excluded_categories", tuple(self.agency_excluded_categories))
+        part_keys = {part.key for part in self.recipe_parts}
+        if not isinstance(self.panel_part_key, str) or self.panel_part_key not in part_keys:
+            raise ConfigError("[SYS] invalid rack_classes: unknown recipe_parts key for panel")
+        for floor_name in ("panel_floor_krw", "panel_floor_unterminated_krw"):
+            floor_value = getattr(self, floor_name)
+            if isinstance(floor_value, bool) or not isinstance(floor_value, int) or floor_value <= 0:
+                raise ConfigError(f"[SYS] invalid {floor_name}: must be > 0")
+        if (
+            not isinstance(self.rack_width_mm, tuple)
+            or len(self.rack_width_mm) != 2
+            or any(isinstance(v, bool) or not isinstance(v, int) for v in self.rack_width_mm)
+            or not 0 < self.rack_width_mm[0] < self.rack_width_mm[1]
+        ):
+            raise ConfigError("[SYS] invalid rack_width_mm: must be an increasing pair")
+        if isinstance(self.rack_max_depth_mm, bool) or not isinstance(self.rack_max_depth_mm, int) or self.rack_max_depth_mm <= 0:
+            raise ConfigError("[SYS] invalid rack_max_depth_mm: must be > 0")
+        if not isinstance(self.rack_exclusion_pattern, str):
+            raise ConfigError("[SYS] invalid rack_exclusion_pattern: expected a string")
+        try:
+            re.compile(self.rack_exclusion_pattern)
+        except re.error:
+            raise ConfigError("[SYS] invalid rack_exclusion_pattern: must compile") from None
+        if not isinstance(self.rack_classes, tuple) or not self.rack_classes:
+            raise ConfigError("[SYS] invalid rack_classes: expected a non-empty tuple")
+        previous = 0
+        for entry in self.rack_classes:
+            if not isinstance(entry, RackClass):
+                raise ConfigError("[SYS] invalid rack_classes: expected RackClass")
+            if isinstance(entry.max_height_mm, bool) or not isinstance(entry.max_height_mm, int) or entry.max_height_mm <= 0:
+                raise ConfigError("[SYS] invalid rack_classes: max_height_mm must be > 0")
+            if entry.max_height_mm <= previous:
+                raise ConfigError("[SYS] invalid rack_classes: max_height_mm must strictly increase")
+            previous = entry.max_height_mm
+            if not isinstance(entry.part_key, str) or entry.part_key not in part_keys:
+                raise ConfigError("[SYS] invalid rack_classes: unknown recipe_parts key")
+            if isinstance(entry.floor_krw, bool) or not isinstance(entry.floor_krw, int) or entry.floor_krw <= 0:
+                raise ConfigError("[SYS] invalid rack_classes: floor must be > 0")
         try:
             re.compile(self.agency_review_name_pattern)
         except re.error:

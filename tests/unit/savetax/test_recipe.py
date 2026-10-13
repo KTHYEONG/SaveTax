@@ -278,6 +278,40 @@ def test_floor_raise_sentence_and_bundle_round_trip(tmp_path) -> None:
     assert loaded["I1"].lines == bundle.lines
 
 
+def test_panel_benchmark_raised_to_floor() -> None:
+    from src.savetax.evidence import PriceEvidence
+    from src.savetax.fixturerecipe import panel_recipe
+
+    evidence = _evidence(min_item_expected_krw=0)
+    recipe = panel_recipe("패치판넬 CAT.6 24PORT", {}, evidence)
+    assert not isinstance(recipe, str)
+    part, quantity = recipe.parts[0]
+    proof = PriceEvidence(evidence.danawa_product_url_template.format(pcode=part.pcode),
+                          "24포트 패치판넬 실제 판매가 62,200원", 62200, _TODAY, True, False)
+    priced = (PricedPart(part, quantity, 62200, 62200, proof),)
+    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="1000000"),)), recipe, priced, _Ds(), evidence, today=_TODAY)
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(467649)
+    assert "그 값으로 올림 = 467,649원" in bundle.claim
+
+
+def test_rack_benchmark_above_floor_kept() -> None:
+    from src.savetax.evidence import PriceEvidence
+    from src.savetax.fixturerecipe import rack_recipe
+
+    evidence = _evidence(min_item_expected_krw=0)
+    recipe = rack_recipe("허브랙", {"외형크기(폭)": "600", "외형크기(높이)": "1200", "외형크기(깊이)": "750"}, evidence)
+    assert not isinstance(recipe, str)
+    part, quantity = recipe.parts[0]
+    proof = PriceEvidence(evidence.danawa_product_url_template.format(pcode=part.pcode),
+                          "허브랙 실제 판매가 600,000원", 600000, _TODAY, True, False)
+    priced = (PricedPart(part, quantity, 600000, 600000, proof),)
+    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="2000000"),)), recipe, priced, _Ds(), evidence, today=_TODAY)
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(767310)
+    assert "그 값으로 올림" not in bundle.claim
+
+
 def test_product_dataclass_round_trip() -> None:
     p = DanawaProduct("1", "n", None, "d", 10, 2, (MallOffer("m", 10, 0),), None)
     assert p.low_price_krw == 10

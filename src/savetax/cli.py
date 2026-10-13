@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--online", action="store_true")
     evidence = sub.add_parser("evidence")
     evidence.add_argument("--lane", choices=("cross", "retail", "agency", "recipe", "all"), default="cross")
-    evidence.add_argument("--recipe-kind", choices=("desktop",), default="desktop")
+    evidence.add_argument("--recipe-kind", choices=("desktop", "panel", "rack"), default="desktop")
     evidence.add_argument("--limit", type=int, default=50)
     evidence.add_argument("--items")
     evidence.add_argument("--batch", type=int, default=0)
@@ -440,14 +440,23 @@ def _run_recipe_lane(
     from src.savetax.desktoprecipe import delivery_terms_ok, desktop_recipe, find_recipe_candidates
     from src.savetax.errors import DataIntegrityError
     from src.savetax.evidence import RejectedFact
+    from src.savetax.fixturerecipe import panel_recipe, rack_recipe
 
     _ = audit
+    if recipe_kind == "desktop":
+        category = evidence.desktop_category
+    elif recipe_kind == "panel":
+        category = evidence.panel_category
+    elif recipe_kind == "rack":
+        category = evidence.rack_category
+    else:
+        raise ConfigError(f"[SYS] invalid recipe_kind: {recipe_kind!r} must be desktop, panel or rack")
     bundles: list[EvidenceBundle] = []
     candidates_n = 0
     available_n = 0
     drafts = 0
     try:
-        found = find_recipe_candidates(dataset, evidence.desktop_category, items=wanted)
+        found = find_recipe_candidates(dataset, category, items=wanted)
         candidates_n = len(found)
         states = {result.input: result.state for result in competition.lookup_items(found)} if found else {}
         available = [item for item in found if states.get(item) is ItemState.AVAILABLE]
@@ -461,19 +470,34 @@ def _run_recipe_lane(
                 if attributes is None:
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, "attributes_unavailable")
                     continue
-                recipe = desktop_recipe(attributes, evidence)
-                if isinstance(recipe, str):
-                    logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
-                    continue
-                detail = competition.get_item(item_id)
-                bad_contracts = {
-                    contract_no
-                    for contract_no in {fact.contract_no for fact in detail.facts}
-                    if not delivery_terms_ok(dataset, raw, item_id, contract_no, evidence.desktop_delivery_terms, evidence.recipe_listings_max)
-                }
-                terms_rejected = [RejectedFact(f.fact_id, "terms_include_installation") for f in detail.facts if f.contract_no in bad_contracts]
-                kept = [f for f in detail.facts if f.contract_no not in bad_contracts]
-                scoped = replace(detail, facts=tuple(kept))
+                if recipe_kind == "desktop":
+                    recipe = desktop_recipe(attributes, evidence)
+                    if isinstance(recipe, str):
+                        logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
+                        continue
+                    detail = competition.get_item(item_id)
+                else:
+                    detail = competition.get_item(item_id)
+                    item_name = detail.name or ""
+                    if recipe_kind == "panel":
+                        recipe = panel_recipe(item_name, attributes, evidence)
+                    else:
+                        recipe = rack_recipe(item_name, attributes, evidence)
+                    if isinstance(recipe, str):
+                        logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
+                        continue
+                if recipe_kind == "desktop":
+                    bad_contracts = {
+                        contract_no
+                        for contract_no in {fact.contract_no for fact in detail.facts}
+                        if not delivery_terms_ok(dataset, raw, item_id, contract_no, evidence.desktop_delivery_terms, evidence.recipe_listings_max)
+                    }
+                    terms_rejected = [RejectedFact(f.fact_id, "terms_include_installation") for f in detail.facts if f.contract_no in bad_contracts]
+                    kept = [f for f in detail.facts if f.contract_no not in bad_contracts]
+                    scoped = replace(detail, facts=tuple(kept))
+                else:
+                    terms_rejected = []
+                    scoped = detail
                 from src.savetax.recipe import build_recipe_bundle, price_parts, recipe_benchmark
 
                 priced = price_parts(recipe, fetcher, evidence, today, cache)
