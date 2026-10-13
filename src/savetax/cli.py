@@ -25,6 +25,7 @@ from src.savetax.http import HttpClient, Transport, urllib_transport
 from src.savetax.publicweb import PublicFetcher
 from src.savetax.rawapi import RawApiClient
 from src.savetax.redaction import redact
+from src.savetax.retail import build_retail_bundle
 from src.savetax.screening import (
     annotate_availability,
     screen_batch,
@@ -58,6 +59,8 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--lane", choices=("cross", "retail", "all"), default="cross")
     evidence.add_argument("--limit", type=int, default=50)
     evidence.add_argument("--items")
+    evidence.add_argument("--batch", type=int, default=0)
+    evidence.add_argument("--batches", type=int, default=1)
     evidence.add_argument("--data-dir", type=Path)
     evidence.add_argument("--out-dir", type=Path)
     evidence.add_argument("--include-review", action="store_true")
@@ -139,12 +142,143 @@ def _run_screen(args: argparse.Namespace, environ: Mapping[str, str] | None, tra
     return 0
 
 
+def _run_cross_lane(
+    competition: CompetitionClient,
+    raw: RawApiClient,
+    fetcher: PublicFetcher,
+    evidence: EvidenceConfig,
+    audit: AuditConfig,
+    out_dir: Path,
+    dataset: Dataset,
+    wanted: list[str] | None,
+    limit: int,
+    include_review: bool,
+) -> tuple[int, int, int]:
+    bundles: list[EvidenceBundle] = []
+    candidates_n = 0
+    available_n = 0
+    drafts = 0
+    try:
+        found = find_cross_candidates(dataset, evidence, audit)
+        if wanted is not None:
+            keep = set(wanted)
+            found = [c for c in found if c.item_id in keep]
+        candidates_n = len(found)
+        ids = [c.item_id for c in found]
+        states = {result.input: result.state for result in competition.lookup_items(ids)}
+        available = [c for c in found if states.get(c.item_id) is ItemState.AVAILABLE]
+        available_n = len(available)
+        event = competition.get_event()
+        today = date.today()
+        for candidate in available[:limit]:
+            try:
+                detail = competition.get_item(candidate.item_id)
+                bundle = build_cross_bundle(candidate, detail, dataset, raw, fetcher, evidence, audit, today=today)
+                if bundle is None:
+                    continue
+                bundles.append(bundle)
+                if bundle.review_required and not include_review:
+                    continue
+                body = build_draft_body(bundle, event, evidence)
+                write_draft(body, Path(out_dir) / "drafts" / f"{bundle.item_id}.json")
+                drafts += 1
+            except ApiError as exc:
+                logger.info("[EVIDENCE] item_id=%s skipped=api_error:%s", redact(candidate.item_id), redact(exc.code))
+                continue
+    finally:
+        write_bundles(bundles, Path(out_dir) / "cross-bundles.jsonl")
+        expected = sum(b.expected_total_krw for b in bundles)
+        logger.info(
+            "[EVIDENCE] lane=cross candidates=%d available=%d bundles=%d drafts=%d expected_krw=%d",
+            candidates_n,
+            available_n,
+            len(bundles),
+            drafts,
+            expected,
+        )
+    return candidates_n, available_n, drafts
+
+
+def _run_retail_lane(
+    competition: CompetitionClient,
+    raw: RawApiClient,
+    fetcher: PublicFetcher,
+    evidence: EvidenceConfig,
+    audit: AuditConfig,
+    out_dir: Path,
+    dataset: Dataset,
+    wanted: list[str] | None,
+    limit: int,
+    include_review: bool,
+    handle: str,
+    batch: int,
+    batches: int,
+    separate_drafts: bool = False,
+) -> tuple[int, int, int]:
+    bundles: list[EvidenceBundle] = []
+    candidates_n = 0
+    available_n = 0
+    drafts = 0
+    try:
+        pooled: list[str] = []
+        for batch_index in range(batch, batch + batches):
+            batch_candidates = screen_batch(dataset, audit, handle, batch_index)
+            if not batch_candidates:
+                break
+            for candidate in batch_candidates:
+                if candidate.item_id not in pooled:
+                    pooled.append(candidate.item_id)
+        if wanted is not None:
+            keep = set(wanted)
+            pooled = [item for item in pooled if item in keep]
+        candidates_n = len(pooled)
+        states: dict[str, ItemState] = {}
+        if pooled:
+            states = {result.input: result.state for result in competition.lookup_items(pooled)}
+        available = [item for item in pooled if states.get(item) is ItemState.AVAILABLE]
+        available_n = len(available)
+        event = competition.get_event()
+        today = date.today()
+        for item_id in available[:limit]:
+            try:
+                detail = competition.get_item(item_id)
+                bundle = build_retail_bundle(detail, dataset, raw, fetcher, evidence, audit, today=today)
+                if bundle is None:
+                    continue
+                bundles.append(bundle)
+                if bundle.review_required and not include_review:
+                    continue
+                body = build_draft_body(bundle, event, evidence)
+                draft_dir = Path(out_dir) / "drafts"
+                if separate_drafts:
+                    draft_dir /= "retail"
+                write_draft(body, draft_dir / f"{bundle.item_id}.json")
+                drafts += 1
+            except ApiError as exc:
+                logger.info("[EVIDENCE] item_id=%s skipped=api_error:%s", redact(item_id), redact(exc.code))
+                continue
+    finally:
+        write_bundles(bundles, Path(out_dir) / "retail-bundles.jsonl")
+        expected = sum(b.expected_total_krw for b in bundles)
+        logger.info(
+            "[EVIDENCE] lane=retail candidates=%d available=%d bundles=%d drafts=%d expected_krw=%d",
+            candidates_n,
+            available_n,
+            len(bundles),
+            drafts,
+            expected,
+        )
+    return candidates_n, available_n, drafts
+
+
 def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, transport: Transport | None) -> int:
-    if args.lane != "cross":
-        raise ConfigError("[SYS] lane not available")
     limit = args.limit
     if limit is None or limit < 1:
         raise ConfigError("[SYS] limit must be >= 1")
+    batch = args.batch if args.batch is not None else 0
+    batches = args.batches if args.batches is not None else 1
+    if batch < 0 or batches < 1:
+        raise ConfigError("[SYS] batch must be >= 0 and batches must be >= 1")
     defaults = SaveTaxConfig()
     evidence_defaults = EvidenceConfig()
     config = replace(
@@ -163,49 +297,40 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
     if args.items is not None:
         wanted = [part.strip() for part in str(args.items).split(",") if part.strip()]
         wanted = list(dict.fromkeys(wanted))
-    bundles: list[EvidenceBundle] = []
-    candidates_n = 0
-    available_n = 0
-    drafts = 0
-    try:
-        with Dataset(config, audit) as dataset:
-            found = find_cross_candidates(dataset, evidence, audit)
-            if wanted is not None:
-                keep = set(wanted)
-                found = [c for c in found if c.item_id in keep]
-            candidates_n = len(found)
-            ids = [c.item_id for c in found]
-            states = {result.input: result.state for result in competition.lookup_items(ids)}
-            available = [c for c in found if states.get(c.item_id) is ItemState.AVAILABLE]
-            available_n = len(available)
-            event = competition.get_event()
-            today = date.today()
-            for candidate in available[:limit]:
-                try:
-                    detail = competition.get_item(candidate.item_id)
-                    bundle = build_cross_bundle(candidate, detail, dataset, raw, fetcher, evidence, audit, today=today)
-                    if bundle is None:
-                        continue
-                    bundles.append(bundle)
-                    if bundle.review_required and not args.include_review:
-                        continue
-                    body = build_draft_body(bundle, event, evidence)
-                    write_draft(body, Path(out_dir) / "drafts" / f"{bundle.item_id}.json")
-                    drafts += 1
-                except ApiError as exc:
-                    logger.info("[EVIDENCE] item_id=%s skipped=api_error:%s", redact(candidate.item_id), redact(exc.code))
-                    continue
-    finally:
-        write_bundles(bundles, Path(out_dir) / "cross-bundles.jsonl")
-        expected = sum(b.expected_total_krw for b in bundles)
-        logger.info(
-            "[EVIDENCE] lane=cross candidates=%d available=%d bundles=%d drafts=%d expected_krw=%d",
-            candidates_n,
-            available_n,
-            len(bundles),
-            drafts,
-            expected,
-        )
+    with Dataset(config, audit) as dataset:
+        if args.lane in ("cross", "all"):
+            _run_cross_lane(
+                competition,
+                raw,
+                fetcher,
+                evidence,
+                audit,
+                Path(out_dir),
+                dataset,
+                wanted,
+                limit,
+                args.include_review,
+            )
+        if args.lane in ("retail", "all"):
+            handle = config.participant_handle
+            if not handle:
+                handle = competition.get_me().handle
+            _run_retail_lane(
+                competition,
+                raw,
+                fetcher,
+                evidence,
+                audit,
+                Path(out_dir),
+                dataset,
+                wanted,
+                limit,
+                args.include_review,
+                handle,
+                batch,
+                batches,
+                separate_drafts=args.lane == "all",
+            )
     return 0
 
 

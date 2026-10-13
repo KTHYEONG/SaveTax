@@ -1077,6 +1077,8 @@ _PAGE_HTML = (
 def _evidence_transport(calls: list, *, item_state: str = "available", fail: str | None = None) -> Any:
     def transport(url: str, headers: object, timeout: float) -> HttpResponse:
         calls.append(url)
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
         if url.endswith("/events/current"):
             return _resp(
                 200,
@@ -1266,11 +1268,183 @@ def test_evidence_invalid_limit_rejected(tmp_path: Path) -> None:
     )
 
 
-def test_evidence_retail_lane_refused(tmp_path: Path) -> None:
-    data_dir = _write_dataset(tmp_path, _evidence_rows())
+def _retail_danawa_transport(calls: list, headers_seen: list) -> Any:
+    fallback_calls: list = []
+
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if isinstance(headers, dict):
+            headers_seen.append((url, dict(headers)))
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "release-live-20261012",
+                    "ruleset_version": "rules-v1",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "catalog",
+                },
+            )
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": "available"} for i in ids]})
+        if "/events/current/items/" in url and "/lookup" not in url:
+            body = _evidence_item_body("11111111")
+            body["snapshot"]["model"] = "EB-PU2216B"
+            body["snapshot"]["manufacturer"] = "Epson"
+            return _resp(200, body)
+        if "/listings/111111111_0000000001" in url:
+            return _resp(200, _evidence_listing_body("111111111_0000000001", "111111111_0", "2760000"))
+        if "search.danawa.com" in url:
+            html = (
+                '<li data-product-seq="77"><p class="mb-2 x">EB-PU2216B 프로젝터</p>'
+                "<span>1,500,000 원</span></li>"
+            )
+            return HttpResponse(status=200, headers={}, body=html.encode(), elapsed_seconds=0.01)
+        if "getProductPriceList" in url:
+            payload = json.dumps({"24": {"result": [{"date": "25-10", "minPrice": 1500000}]}, "12": {"result": []}})
+            return HttpResponse(status=200, headers={}, body=payload.encode(), elapsed_seconds=0.01)
+        if "prod.danawa.com/info" in url:
+            html = (
+                '<script type="application/ld+json">{"@type": "Product", "name": "EB-PU2216B", '
+                '"brand": {"name": "Sony"}, "description": "레이저 프로젝터", '
+                '"offers": {"lowPrice": 1500000, "offerCount": 2}}</script>'
+                '<ul class="list__mall-price">'
+                '<li><span aria-label="몰A"></span><span class="text__num">1,500,000</span><span>무료배송</span></li>'
+                '<li><span aria-label="몰B"></span><span class="text__num">1,600,000</span><span>무료배송</span></li>'
+                "</ul><span>등록월: 2025-03</span>"
+            )
+            return HttpResponse(status=200, headers={}, body=html.encode(), elapsed_seconds=0.01)
+        if "savetax.now/listing/" in url:
+            return HttpResponse(status=200, headers={}, body=_PAGE_HTML.encode(), elapsed_seconds=0.01)
+        fallback_calls.append(url)
+        raise AssertionError(f"unexpected url {url}")
+
+    return transport
+
+
+def test_retail_lane_writes_review_bundles_without_drafts(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, [_base_row()])
+    out_dir = tmp_path / "ev"
+    calls: list = []
+    seen: list = []
+    code = main(
+        ["evidence", "--lane", "retail", "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_retail_danawa_transport(calls, seen),
+    )
+    assert code == 0
+    lines = (out_dir / "retail-bundles.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["review_required"] is True
+    assert not (out_dir / "drafts" / "11111111.json").exists()
+
+
+def test_retail_lane_include_review_drafts_them(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, [_base_row()])
+    out_dir = tmp_path / "ev"
+    calls: list = []
+    seen: list = []
+    code = main(
+        ["evidence", "--lane", "retail", "--out-dir", str(out_dir), "--data-dir", str(data_dir), "--include-review"],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_retail_danawa_transport(calls, seen),
+    )
+    assert code == 0
+    assert (out_dir / "drafts" / "11111111.json").exists()
+
+
+def test_retail_public_requests_carry_no_credential(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, [_base_row()])
+    calls: list = []
+    seen: list = []
+    code = main(
+        ["evidence", "--lane", "retail", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_retail_danawa_transport(calls, seen),
+    )
+    assert code == 0
+    public = [(u, h) for u, h in seen if "danawa" in u or "shopexample" in u]
+    assert public
+    assert all("Authorization" not in h for _, h in public)
+
+
+def test_retail_items_filter_and_empty_bundle(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, [_base_row()])
+    calls: list = []
+    seen: list = []
+    code = main(
+        ["evidence", "--lane", "retail", "--items", "11111111", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_retail_danawa_transport(calls, seen),
+    )
+    assert code == 0
+    assert any("ids=11111111" in u for u in calls if "/lookup" in u)
+
+    def empty_transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "r",
+                    "ruleset_version": "v",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "c",
+                },
+            )
+        if "/items/lookup" in url:
+            return _resp(200, _lookup_body(["11111111"]))
+        if "/events/current/items/" in url:
+            return _resp(200, _evidence_item_body("11111111"))
+        if "/listings/" in url:
+            return _resp(200, _evidence_listing_body(url.rsplit("/", 1)[-1], "111111111_0", "2760000"))
+        return HttpResponse(status=404, headers={}, body=b"", elapsed_seconds=0.01)
+
+    out_dir = tmp_path / "ev-empty"
+    code2 = main(
+        ["evidence", "--lane", "retail", "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=empty_transport,  # type: ignore[arg-type]
+    )
+    assert code2 == 0
+    assert (out_dir / "retail-bundles.jsonl").exists()
+
+
+def test_retail_item_api_error_continues(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, [_base_row()])
+    calls: list = []
+    seen: list = []
+    base = _retail_danawa_transport(calls, seen)
+
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        if "/events/current/items/11111111" in url and "/lookup" not in url:
+            return _resp(403, {"code": "FORBIDDEN", "message": "m", "request_id": "r", "retryable": False})
+        return base(url, headers, timeout)
+
+    code = main(
+        ["evidence", "--lane", "retail", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=transport,  # type: ignore[arg-type]
+    )
+    assert code == 0
+
+
+def test_evidence_bad_batch_returns_2(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, [_base_row()])
     assert (
         main(
-            ["evidence", "--lane", "retail", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+            ["evidence", "--lane", "retail", "--batches", "0", "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
             environ={"SAVETAX_TOKEN": TOKEN},
             transport=_evidence_transport([]),
         )
@@ -1452,8 +1626,39 @@ def test_evidence_preserves_first_bundle_and_handles_second_item(tmp_path: Path,
         assert "자료 접근 대기" in caplog.text
 
 
-def test_evidence_all_lane_is_not_silently_partial() -> None:
-    assert main(["evidence", "--lane", "all"], environ={}, transport=_evidence_transport([])) == 2
+def test_evidence_all_lane_writes_both_bundles(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    out_dir = tmp_path / "ev"
+    code = main(
+        ["evidence", "--lane", "all", "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_evidence_transport([]),
+    )
+    assert code == 0
+    assert (out_dir / "cross-bundles.jsonl").exists()
+    assert (out_dir / "retail-bundles.jsonl").exists()
+
+
+def test_all_lane_drafts_do_not_overwrite_cross_evidence(tmp_path: Path) -> None:
+    rows = _evidence_rows()
+    rows[0]["dlv_amount"] = 27600000
+    rows[0]["dlv_qty"] = 10
+    data_dir = _write_dataset(tmp_path, rows)
+    out_dir = tmp_path / "out"
+    retail = _retail_danawa_transport([], [])
+    cross = _evidence_transport([])
+
+    def transport(url: str, headers: Any, timeout: float) -> HttpResponse:
+        if url.endswith("/listings/222222222_0000000001"):
+            return cross(url, headers, timeout)
+        return retail(url, headers, timeout)
+
+    assert main(["evidence", "--lane", "all", "--include-review", "--data-dir", str(data_dir),
+                 "--out-dir", str(out_dir)], environ={"SAVETAX_TOKEN": TOKEN}, transport=transport) == 0
+    cross_draft = json.loads((out_dir / "drafts" / "11111111.json").read_text())
+    retail_draft = json.loads((out_dir / "drafts" / "retail" / "11111111.json").read_text())
+    assert "savetax.now/listing/" in cross_draft["lines"][0]["price_evidence"][0]["source_url"]
+    assert "prod.danawa.com" in retail_draft["lines"][0]["price_evidence"][0]["source_url"]
 
 
 @pytest.mark.parametrize("options", [["--limit", "1"], ["--items", "11111113"]])
