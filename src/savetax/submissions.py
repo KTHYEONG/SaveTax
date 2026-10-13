@@ -15,7 +15,7 @@ from urllib.parse import quote
 from src.savetax.competition import CompetitionClient
 from src.savetax.config import SaveTaxConfig
 from src.savetax.errors import ApiError, ConfigError, DataIntegrityError, NetworkError, SubmissionPending
-from src.savetax.http import HttpClient
+from src.savetax.http import HttpClient, HttpResponse
 from src.savetax.redaction import redact
 from src.savetax.writehttp import WriteHttpClient
 
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _KEY_RE = re.compile(r"^[\x21-\x7e]{1,128}$")
+_PREVIEW_ATTEMPTS = 3
 _NEXT_ACTIONS = frozenset({"submit", "revise_existing", "pick_another_product"})
 _LINT_STATUSES = frozenset({"pending", "clean", "suspect", "unreadable"})
 _NON_RETRYABLE = frozenset(
@@ -357,7 +358,7 @@ class SubmissionClient:
         """Dry-run a draft body without side effects."""
         if "canonical_product_id" in body:
             _check_sid(body["canonical_product_id"])
-        response = self._write.post_json("/submissions/preview", body, idempotency_key="preview")
+        response = self._post_preview(body)
         if response.status != 200:
             raise _flat_error("competition", response.status, response.body)
         data = _decode_object(response.body, "preview")
@@ -466,6 +467,23 @@ class SubmissionClient:
         )
         logger.info("[SUBMIT] withdrawn sid=%s", redact(receipt.submission_id))
         return receipt
+
+    def _post_preview(self, body: Mapping[str, object]) -> HttpResponse:
+        """Preview has no side effects, so rate limits and 5xx are retried regardless of the error body."""
+        for attempt in range(_PREVIEW_ATTEMPTS):
+            last_attempt = attempt == _PREVIEW_ATTEMPTS - 1
+            try:
+                response = self._write.post_json("/submissions/preview", body, idempotency_key="preview")
+            except NetworkError:
+                if last_attempt:
+                    raise
+                self._sleep(self._config.retry_cooldown_seconds)
+                continue
+            if (response.status == 429 or response.status >= 500) and not last_attempt:
+                self._sleep(self._config.retry_cooldown_seconds)
+                continue
+            return response
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def _send_with_retry(
         self,

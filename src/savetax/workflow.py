@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_OPEN_PHASES = frozenset({"running", "open"})  # live API reports RUNNING
+
 __all__ = [
     "SubmitPlan",
     "body_hash",
@@ -132,7 +134,7 @@ def preflight(
     item = str(body.get("canonical_product_id", bundle.item_id))
     if body.get("dataset_release_id") != event.dataset_release_id or body.get("ruleset_version") != event.ruleset_version:
         reasons.append("release_changed")
-    if event.phase != "open" or not (event.opens_at <= now < event.closes_at):
+    if event.phase.casefold() not in _OPEN_PHASES or not (event.opens_at <= now < event.closes_at):
         reasons.append("window_closed")
     if lookup_state is ItemState.CLAIMED_BY_ME:
         reasons.append("already_mine")

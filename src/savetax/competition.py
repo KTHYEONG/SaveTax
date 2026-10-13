@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 _RETRY_503_CODES = frozenset({"CATALOG_UNAVAILABLE", "REFORM_CHECK_UNAVAILABLE"})
+_RETRY_429_CODES = frozenset({"RATE_LIMITED", "NON_JSON_ERROR"})  # edge limiter replies without a JSON body
 
 
 class ItemState(enum.StrEnum):
@@ -218,7 +219,7 @@ class CompetitionClient:
                 return response
             err = _flat_error("competition", response.status, response.body)
             if response.status not in retried:
-                if response.status == 429 and err.code == "RATE_LIMITED":
+                if response.status == 429 and err.code in _RETRY_429_CODES:
                     retried.add(429)
                     self._sleep(self._config.rate_limit_max_wait_seconds)
                     continue

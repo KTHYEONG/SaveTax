@@ -11,14 +11,22 @@
 - **Zero Magic Numbers:** Configurable parameters (markup threshold multiplier, minimum total contract expenditure, recency filters) must be declared in strongly-typed configuration contracts (`AuditConfig`/`Spec`), never hardcoded as raw magic literals.
 - **Absolute Truth Preservation (No Hallucination):** Never fabricate product IDs, delivery histories, market prices, or markup justifications. If datasets, APIs, or local caches are unreachable, halt candidate exploration with explicit status `자료 접근 대기` rather than fabricating evidence or claiming completion.
 - **Causal Data Ordering:** Candidate evaluation must trace historical procurement records chronologically against contemporaneous market prices at delivery time.
+- **Official Dataset Interpretation Rules (`listings.parquet`):**
+  1. **Deduplicate deliveries:** The same order record appears under multiple listings. Count each `dlv_key` once before summing `dlv_*`; a naive sum inflates totals by ~24%.
+  2. **`site_sales_qty` is not sales volume:** It is a number displayed on the site. Never multiply it by price to derive an amount. `dlv_qty` is keyed by (contract, item), shared across listings with that key, and differs from the competition-scoring quantity.
+  3. **`dlv_*` is order-level:** It reflects delivery requests (orders), not inspection or payment completion. Listings without orders (~71%) are NULL, not 0; never coalesce to 0.
+  4. **Compare like-for-like:** Compare prices only within the same detail name and unit. Raw unit prices contain absurd source values (e.g. 1 KRW); filter them, and align VAT basis with the market price (the source does not flag VAT inclusion). For competition submission lines, unit and tax basis follow the competition fact's `comparison_basis_id` as returned by the facts API, never the dataset `unit`, and are never converted.
+  5. **No anomaly verdicts in data:** A price gap is not "confirmed waste" until evidence (sales page URL, observation timestamp, price) is verified.
 
 ## 2. Participant Credential & Security Invariants
 - **PAT Isolation Boundary:** Participant Personal Access Tokens (PAT) are strictly confined to:
   1. Protected SaveTax API (`api.savetax.now`) via `Authorization: Bearer <PAT>` header.
   2. The single official product ZIP URL (`https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip`) via `Authorization: Bearer <PAT>` header.
   3. The official SaveTax MCP (`https://mcp.savetax.now/mcp`) via `Authorization: Bearer <PAT>` header, registered with `claude mcp add --scope local` so the token never lands in repository files (`.mcp.json` must not carry it).
+  4. The competition API under `https://hackathon.savetax.now/v1/` only, via `Authorization: Bearer <PAT>` header over HTTPS (plain `http://` invalidates the token). Never follow redirects on authenticated requests.
 - **Prohibited Leakage Vectors:** NEVER pass PAT to:
-  - Public manifest or documentation URLs (`hackathon.savetax.now`).
+  - Public manifest or documentation URLs, i.e. every `hackathon.savetax.now` path outside `/v1/` (`/docs/*`, site root, `agent-guidance-version.json`).
+  - Third-party price sources, including the Danawa MCP (`mcp.ai.cowave.kr`).
   - Arbitrary `workers.dev` endpoints outside the single official ZIP URL.
   - URL query strings, command-line arguments, shell histories, logs, console output, code, commit messages, or persistent repository files.
   - DuckDB query strings, random seeds, or partition identifiers.

@@ -289,6 +289,30 @@ def test_resolve_handles_all_branches() -> None:
         client6.resolve_request("bad key!")
 
 
+def test_preview_retries_rate_limit_and_server_errors() -> None:
+    ok = {"ok": True, "total_amount_krw": 5, "lines": [], "next_action": "submit"}
+    client, calls, _, sleeps = _harness([_resp(429, b"<html>slow down</html>"), _resp(503, b""), _resp(200, ok)])
+    assert client.preview(_valid_body()).total_amount_krw == 5
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+
+def test_preview_gives_up_after_three_rate_limited_attempts() -> None:
+    client, calls, _, sleeps = _harness([_resp(429, b"x"), _resp(429, b"x"), _resp(429, b"x")])
+    with pytest.raises(ApiError):
+        client.preview(_valid_body())
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+
+def test_preview_retries_network_failure_then_raises() -> None:
+    client, calls, _, sleeps = _harness([NetworkError(NetworkStage.TCP_TLS_CONNECT, "h", "down")] * 3)
+    with pytest.raises(NetworkError):
+        client.preview(_valid_body())
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+
 def test_preview_error_and_malformed() -> None:
     client, _, _, _ = _harness([_resp(409, {"code": "PRODUCT_ALREADY_CLAIMED", "message": "m"})])
     with pytest.raises(ApiError):

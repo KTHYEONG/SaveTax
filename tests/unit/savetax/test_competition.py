@@ -240,6 +240,13 @@ def test_rate_limit_waits_once_then_succeeds() -> None:
     assert len(calls) == 2
 
 
+def test_edge_rate_limit_without_json_body_is_retried() -> None:
+    client, calls, sleeps = _client([_resp(429, b"<html>busy</html>"), _resp(200, _item_body())])
+    assert client.get_item("24384969").item_id == "24384969"
+    assert sleeps == [60.0]
+    assert len(calls) == 2
+
+
 def test_rate_limit_twice_raises() -> None:
     err = {"code": "RATE_LIMITED", "message": "slow", "request_id": "r", "retryable": True}
     client, calls, sleeps = _client([_resp(429, err), _resp(429, err)])

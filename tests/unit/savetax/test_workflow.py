@@ -224,6 +224,20 @@ def test_preflight_window_closed() -> None:
     assert "window_closed" in plan.reasons
 
 
+def test_preflight_accepts_live_running_phase_and_rejects_other_phases() -> None:
+    from dataclasses import replace
+
+    def plan_for(phase: str) -> tuple[str, ...]:
+        return preflight(
+            _body(), _bundle(), event=replace(_event(), phase=phase), status=_status(),
+            lookup_state=ItemState.AVAILABLE, preview=_preview(),
+            page_prices={"https://example.com/a": 1000}, reserve=5, now=_now(),
+        ).reasons
+
+    assert "window_closed" not in plan_for("RUNNING")
+    assert "window_closed" in plan_for("ENDED")
+
+
 def test_preflight_claimed_and_mine() -> None:
     claimed = preflight(_body(), _bundle(), event=_event(), status=_status(), lookup_state=ItemState.CLAIMED,
                         preview=_preview(), page_prices={"https://example.com/a": 1000},
