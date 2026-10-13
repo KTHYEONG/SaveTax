@@ -21,7 +21,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "UnitConflictPolicy", "load_token"]
+__all__ = ["ApprovalConfig", "AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "UnitConflictPolicy", "load_token"]
 
 
 class Secret:
@@ -428,3 +428,34 @@ class EvidenceConfig:
         hosts.update(shop.host.lower() for shop in self.shops)
         hosts.discard("")
         return frozenset(hosts)
+
+
+@dataclass(frozen=True)
+class ApprovalConfig:
+    """Approval gate and submission pacing."""
+
+    ttl_hours: int = 6
+    reserve_claims: int = 5
+    lint_poll_seconds: float = 7.0
+    lint_timeout_seconds: float = 600.0
+    pause_between_submits_seconds: float = 1.0
+    stop_after_consecutive_suspect: int = 2
+    ledger_path: Path = field(default_factory=lambda: Path("scratch/evidence/ledger.jsonl"))
+
+    def __post_init__(self) -> None:
+        for name in ("ttl_hours", "reserve_claims", "stop_after_consecutive_suspect"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(f"[SYS] invalid {name}: expected integer")
+        if self.ttl_hours < 1:
+            raise ConfigError("[SYS] invalid ttl_hours: must be >= 1")
+        if self.reserve_claims < 0:
+            raise ConfigError("[SYS] invalid reserve_claims: must be >= 0")
+        if not math.isfinite(self.lint_poll_seconds) or self.lint_poll_seconds <= 0:
+            raise ConfigError("[SYS] invalid lint_poll_seconds: must be > 0")
+        if not math.isfinite(self.lint_timeout_seconds) or self.lint_timeout_seconds < self.lint_poll_seconds:
+            raise ConfigError("[SYS] invalid lint_timeout_seconds: must be >= lint_poll_seconds")
+        if not math.isfinite(self.pause_between_submits_seconds) or self.pause_between_submits_seconds < 0:
+            raise ConfigError("[SYS] invalid pause_between_submits_seconds: must be >= 0")
+        if self.stop_after_consecutive_suspect < 1:
+            raise ConfigError("[SYS] invalid stop_after_consecutive_suspect: must be >= 1")
