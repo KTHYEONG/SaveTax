@@ -333,3 +333,27 @@ def test_request_key_path_requires_canonical_encoding(encoded: str) -> None:
     assert not SaveTaxConfig().allows_credential(
         "https://hackathon.savetax.now/v1/events/current/submission-requests/" + encoded
     )
+
+
+def test_delivery_paging_defaults_are_valid() -> None:
+    cfg = SaveTaxConfig()
+    assert cfg.delivery_page_size == 200
+    assert cfg.delivery_rows_max == 4000
+
+
+@pytest.mark.parametrize("size", [0, 201])
+def test_out_of_range_page_size_is_refused(size: int) -> None:
+    with pytest.raises(ConfigError):
+        SaveTaxConfig(delivery_page_size=size)
+
+
+def test_row_cap_below_one_page_is_refused() -> None:
+    with pytest.raises(ConfigError):
+        SaveTaxConfig(delivery_page_size=200, delivery_rows_max=100)
+
+
+def test_delivery_paging_bool_is_refused() -> None:
+    with pytest.raises(ConfigError):
+        SaveTaxConfig(delivery_page_size=True)  # type: ignore[arg-type]
+    with pytest.raises(ConfigError):
+        SaveTaxConfig(delivery_rows_max=False)  # type: ignore[arg-type]

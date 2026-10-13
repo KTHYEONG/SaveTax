@@ -1776,3 +1776,92 @@ def test_series_failed_page_is_not_refetched_for_next_fact(tmp_path: Path) -> No
     assert bundle is not None
     assert len(bundle.lines) == 2
     assert all(line.benchmark_unit_price_krw == Decimal("2300000") for line in bundle.lines)
+
+
+_TERMS_PAGE = (
+    "사진 불러오는 중 제품명 단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+    "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 2025.1.1 ~ 2026.12.31 "
+    "납품 조건 서울 납품요구 기록 없음 인증 없음 "
+    "같은 물건의 다른 등재 333333333_0000000002 납품 단가 1,000원 "
+    "계약 조건 계약번호 222222222_0 계약 방식 다수공급자계약 변경 차수 19 계약일 2025.11.14 "
+    "계약 부서 구매과 공급 지역 전지역(제주 및 도서산간지역 운임비 별도) 인증 없음 업체 구분 중소기업 "
+    "계약 특수조건 원문 특약 없음"
+)
+
+
+def test_region_is_read_from_contract_terms_block() -> None:
+    page = parse_listing_page(_TERMS_PAGE)
+    assert page.supply_region == "전지역(제주 및 도서산간지역 운임비 별도)"
+
+
+def test_change_order_and_contract_date_are_parsed() -> None:
+    page = parse_listing_page(_TERMS_PAGE)
+    assert page.change_order == "19"
+    assert page.contract_date == date(2025, 11, 14)
+
+
+def test_pre_sibling_region_wins() -> None:
+    text = _TERMS_PAGE.replace(
+        "납품요구 기록 없음 인증 없음", "납품요구 기록 없음 공급 지역 서울 인증 없음"
+    )
+    page = parse_listing_page(text)
+    assert page.supply_region == "서울"
+
+
+def test_page_without_terms_block_is_unchanged() -> None:
+    page = parse_listing_page(_PAGE)
+    assert page.change_order is None
+    assert page.contract_date is None
+
+
+def test_special_terms_text_is_not_parsed() -> None:
+    text = (
+        "단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+        "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 "
+        "납품요구 기록 없음 인증 없음 "
+        "같은 물건의 다른 등재 333333333_0000000002 납품 단가 1,000원 "
+        "계약 조건 계약번호 1 계약 방식 A 변경 차수 2 계약일 2025.1.2 계약 부서 B 인증 C 업체 구분 D "
+        "계약 특수조건 원문 공급 지역 부산"
+    )
+    assert parse_listing_page(text).supply_region is None
+
+
+def test_terms_block_edge_branches_are_covered() -> None:
+    from src.savetax.crosscontract import _parse_terms_block
+    from src.savetax.crosscontract import _parse_terms_change_order
+    from src.savetax.crosscontract import _parse_terms_contract_date
+
+    assert _parse_terms_block("no block here") == {}
+    assert _parse_terms_block("계약 조건 only without number") == {}
+    assert _parse_terms_change_order(None) is None
+    assert _parse_terms_change_order("차수 없음") is None
+    assert _parse_terms_change_order("07차") == "7"
+    assert _parse_terms_contract_date(None) is None
+    assert _parse_terms_contract_date("soon") is None
+    assert _parse_terms_contract_date("2025.13.1") is None
+    text = (
+        "단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+        "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 "
+        "납품요구 기록 없음 계약 특수조건 원문 앞 공급 지역 부산 인증 없음"
+    )
+    assert parse_listing_page(text).supply_region is None
+
+
+def test_terms_without_siblings_preserve_primary_fields() -> None:
+    base = _TERMS_PAGE.split("같은 물건의 다른 등재", 1)[0]
+    terms = "계약 조건" + _TERMS_PAGE.split("계약 조건", 1)[1]
+    page = parse_listing_page(base + terms)
+    assert page.delivery_terms == "서울"
+    assert page.vendor_name == "벤더"
+    assert page.contract_period == "2025.1.1 ~ 2026.12.31"
+    assert page.supply_region == "전지역(제주 및 도서산간지역 운임비 별도)"
+    assert page.contract_date == date(2025, 11, 14)
+
+
+def test_special_terms_cannot_create_contract_block() -> None:
+    base = _TERMS_PAGE.split("같은 물건의 다른 등재", 1)[0]
+    text = base + "계약 특수조건 원문 계약 조건 계약번호 X 변경 차수 99 계약일 2026.1.1 공급 지역 부산"
+    page = parse_listing_page(text)
+    assert page.supply_region is None
+    assert page.change_order is None
+    assert page.contract_date is None

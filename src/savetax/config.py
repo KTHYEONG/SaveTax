@@ -106,6 +106,8 @@ class SaveTaxConfig:
     token_env_var: str = "SAVETAX_TOKEN"  # noqa: S105
     dotenv_path: Path = field(default_factory=lambda: Path(".env"))
     dotenv_keys: tuple[str, ...] = ("SAVETAX_TOKEN", "tok")  # noqa: S105
+    delivery_page_size: int = 200
+    delivery_rows_max: int = 4000
 
     def __post_init__(self) -> None:
         _check_url(self.competition_base_url, "competition_base_url")
@@ -122,6 +124,14 @@ class SaveTaxConfig:
             raise ConfigError("[SYS] invalid rate_limit_max_wait_seconds: must be > 0")
         if not self.dotenv_keys:
             raise ConfigError("[SYS] invalid dotenv_keys: must be non-empty")
+        if isinstance(self.delivery_page_size, bool) or not isinstance(self.delivery_page_size, int):
+            raise ConfigError("[SYS] invalid delivery_page_size: expected integer")
+        if isinstance(self.delivery_rows_max, bool) or not isinstance(self.delivery_rows_max, int):
+            raise ConfigError("[SYS] invalid delivery_rows_max: expected integer")
+        if not 1 <= self.delivery_page_size <= 200:
+            raise ConfigError("[SYS] invalid delivery_page_size: must be 1..200")
+        if self.delivery_rows_max < self.delivery_page_size:
+            raise ConfigError("[SYS] invalid delivery_rows_max: must be >= delivery_page_size")
 
     @property
     def dataset_version(self) -> str:

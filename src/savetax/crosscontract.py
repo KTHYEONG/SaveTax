@@ -113,6 +113,70 @@ class ListingPage:
     contract_period: str | None
     delivery_terms: str | None
     supply_region: str | None
+    change_order: str | None = None
+    contract_date: date | None = None
+
+
+_TERMS_LABELS = (
+    "계약번호",
+    "계약 방식",
+    "변경 차수",
+    "계약일",
+    "계약 부서",
+    "공급 지역",
+    "인증",
+    "업체 구분",
+)
+_TERMS_START = "계약 조건"
+_TERMS_END = "계약 특수조건 원문"
+
+
+def _parse_terms_block(text: str) -> dict[str, str | None]:
+    text = text.split(_TERMS_END, 1)[0]
+    match = re.search(r"계약 조건\s+계약번호", text)
+    if match is None:
+        return {}
+    block = text[match.start():]
+    positions: dict[str, tuple[int, int] | None] = {}
+    cursor = 0
+    for label in _TERMS_LABELS:
+        pos = block.find(label, cursor)
+        if pos < 0:
+            positions[label] = None
+        else:
+            positions[label] = (pos, pos + len(label))
+            cursor = pos + len(label)
+    values: dict[str, str | None] = {}
+    ordered = [label for label in _TERMS_LABELS if positions[label] is not None]
+    for index, label in enumerate(ordered):
+        label_end = positions[label][1]  # type: ignore[index]
+        next_start = positions[ordered[index + 1]][0] if index + 1 < len(ordered) else len(block)  # type: ignore[index]
+        chunk = block[label_end:next_start].strip()
+        values[label] = chunk or None
+    for label in _TERMS_LABELS:
+        values.setdefault(label, None)
+    return values
+
+
+def _parse_terms_change_order(value: str | None) -> str | None:
+    if value is None:
+        return None
+    digits = re.sub(r"\D", "", value)
+    if not digits:
+        return None
+    return str(int(digits))
+
+
+def _parse_terms_contract_date(value: str | None) -> date | None:
+    if value is None:
+        return None
+    match = re.fullmatch(r"\s*(\d{4})\.(\d{1,2})\.(\d{1,2})\s*", value)
+    if match is None:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
 
 
 def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: AuditConfig) -> list[CrossCandidate]:
@@ -278,6 +342,7 @@ def _find_label(text: str, label: str, start: int) -> int | None:
 def parse_listing_page(text: str) -> ListingPage:
     """Parse visible page text; raises DataIntegrityError when the listing id, item id or unit price is missing."""
     segment = text.split(_SIBLING_MARKER, 1)[0]
+    segment = segment.split(_TERMS_START, 1)[0].split(_TERMS_END, 1)[0].strip()
     positions: dict[str, tuple[int, int] | None] = {}
     cursor = 0
     for label in _LABELS:
@@ -326,6 +391,10 @@ def parse_listing_page(text: str) -> ListingPage:
         and compare_units(unit, unit_label) is UnitRelation.INCOMPATIBLE
     ):
         raise DataIntegrityError("[DATA] malformed listing page: conflicting unit labels")
+    terms_values = _parse_terms_block(text)
+    supply_region = values.get("공급 지역")
+    if supply_region is None:
+        supply_region = terms_values.get("공급 지역")
     return ListingPage(
         listing_id=listing_id,
         item_id=item_id,
@@ -336,7 +405,9 @@ def parse_listing_page(text: str) -> ListingPage:
         vendor_name=values.get("공급 업체"),
         contract_period=values.get("계약 기간"),
         delivery_terms=values.get("납품 조건"),
-        supply_region=values.get("공급 지역"),
+        supply_region=supply_region,
+        change_order=_parse_terms_change_order(terms_values.get("변경 차수")),
+        contract_date=_parse_terms_contract_date(terms_values.get("계약일")),
     )
 
 
