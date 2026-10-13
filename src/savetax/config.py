@@ -21,7 +21,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["ApprovalConfig", "AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "UnitConflictPolicy", "load_token"]
+__all__ = ["ApprovalConfig", "AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
 
 
 class Secret:
@@ -258,6 +258,14 @@ class UnitConflictPolicy(enum.StrEnum):
     REJECT = "reject"
 
 
+class VariantPolicy(enum.StrEnum):
+    """How to gate benchmarks when an item carries hidden variants."""
+
+    STRICT = "strict"
+    ALLOW_LOW_FACT = "allow_low_fact"
+    OFF = "off"
+
+
 @dataclass(frozen=True)
 class EvidenceConfig:
     """Thresholds, public hosts and output paths for evidence collection."""
@@ -374,12 +382,17 @@ class EvidenceConfig:
     max_lines_per_draft: int = 500
     max_draft_bytes: int = 1_000_000
     unit_conflict_policy: UnitConflictPolicy = UnitConflictPolicy.ANNOTATE
+    variant_policy: VariantPolicy = VariantPolicy.STRICT
 
     def __post_init__(self) -> None:
         try:
             object.__setattr__(self, "unit_conflict_policy", UnitConflictPolicy(self.unit_conflict_policy))
         except ValueError:
             raise ConfigError("[SYS] invalid unit_conflict_policy: must be annotate or reject") from None
+        try:
+            object.__setattr__(self, "variant_policy", VariantPolicy(self.variant_policy))
+        except ValueError:
+            raise ConfigError("[SYS] invalid variant_policy: must be strict, allow_low_fact or off") from None
         for field_name, placeholder in _TEMPLATE_PLACEHOLDERS:
             value = getattr(self, field_name)
             _check_url(value, field_name)

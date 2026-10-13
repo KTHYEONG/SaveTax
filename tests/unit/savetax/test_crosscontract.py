@@ -112,7 +112,7 @@ def _detail(
     item_id: str = "11111111",
     unit: str | None = "대",
     price: str = "2508000",
-    contract_no: str = "222222222_0",
+    contract_no: str | None = None,
     terms: str | None = "현장설치도",
     region: str | None = "서울",
     begin: str | None = "20250101",
@@ -125,7 +125,7 @@ def _detail(
         unit=unit,
         price_krw=Decimal(price),
         price_kind=kind,
-        contract_no=contract_no,
+        contract_no=contract_no if contract_no is not None else listing_id[:11],
         contract_type=None,
         contract_begin=date(int(begin[0:4]), int(begin[4:6]), int(begin[6:8])) if begin else None,
         contract_end=date(int(end[0:4]), int(end[4:6]), int(end[6:8])) if end else None,
@@ -415,10 +415,23 @@ def test_page_without_price_is_rejected() -> None:
         parse_listing_page("단위 대 물품식별번호 1 계약품목관리번호 2 공급 업체 V")
 
 
-def _bundle_dataset(tmp_path: Path, order_price: str = "2736000") -> Dataset:
+def _bundle_dataset(
+    tmp_path: Path, order_price: str = "2736000",
+    benchmarks: list[ListingDetail] | None = None,
+) -> Dataset:
     rows = [
         _base_row(listing_id="111111111_0000000001", price=2736000, dlv_amount=5472000, dlv_qty=2),
     ]
+    if benchmarks is None:
+        benchmarks = [_detail("222222222_0000000001"), _detail("333333333_0000000002")]
+    rows.extend(
+        _base_row(
+            listing_id=b.listing_id, price=b.price_krw, dlv_key=None,
+            dlv_lines=None, dlv_qty=None, dlv_unit=None, dlv_amount=None,
+            dlv_first_date=None, dlv_last_date=None,
+        )
+        for b in benchmarks
+    )
     return _write_dataset(tmp_path, rows)
 
 
@@ -429,7 +442,9 @@ def _bundle_setup(
     facts: list[Fact] | None = None,
     candidate: CrossCandidate | None = None,
 ) -> tuple[Dataset, _FakeRaw, PublicFetcher, list, ItemDetail, CrossCandidate]:
-    ds = _bundle_dataset(tmp_path)
+    ds = _bundle_dataset(tmp_path, benchmarks=[
+        b for lid, b in raw_map.items() if b is not None and lid != "111111111_0000000001"
+    ])
     raw = _FakeRaw(raw_map)
     seen: list = []
     fetch = _fetcher(pages, seen)
@@ -549,16 +564,16 @@ def test_discounted_order_falls_back_with_caveat(tmp_path: Path) -> None:
 def test_page_price_mismatch_falls_back(tmp_path: Path) -> None:
     order = _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울")
     b1 = _detail("222222222_0000000001", price="2400000", terms="서울", region="서울")
-    b2 = _detail("222222222_0000000002", price="2508000", terms="서울", region="서울")
+    b2 = _detail("333333333_0000000002", price="2508000", terms="서울", region="서울")
     pages = {
         "222222222_0000000001": (
             200,
             "단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
             "계약 단가 9,999,999원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음",
         ),
-        "222222222_0000000002": (
+        "333333333_0000000002": (
             200,
-            "단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000002 "
+            "단위 대 물품식별번호 11111111 계약품목관리번호 333333333_0000000002 "
             "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음",
         ),
     }
@@ -567,7 +582,7 @@ def test_page_price_mismatch_falls_back(tmp_path: Path) -> None:
     seen: list = []
     fetch = _fetcher(pages, seen)
     detail = _item_detail([_fact()])
-    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "222222222_0000000002"))
+    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "333333333_0000000002"))
     try:
         bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
     finally:
@@ -943,15 +958,15 @@ def test_zero_expected_line_is_rejected(tmp_path: Path) -> None:
 def test_unreadable_page_falls_back(tmp_path: Path) -> None:
     order = _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울")
     b1 = _detail("222222222_0000000001", price="2400000", terms="서울", region="서울")
-    b2 = _detail("222222222_0000000002", price="2508000", terms="서울", region="서울")
+    b2 = _detail("333333333_0000000002", price="2508000", terms="서울", region="서울")
     good = (
-        "단위 대 물품식별번호 11111111 계약품목관리번호 222222222_0000000002 "
+        "단위 대 물품식별번호 11111111 계약품목관리번호 333333333_0000000002 "
         "계약 단가 2,508,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
     )
     ds = _bundle_dataset(tmp_path)
     raw = _FakeRaw({order.listing_id: order, b1.listing_id: b1, b2.listing_id: b2})
     seen: list = []
-    pages = {"222222222_0000000002": (200, good)}
+    pages = {"333333333_0000000002": (200, good)}
     fetch = _fetcher(pages, seen)
     seen_pages = pages
 
@@ -970,7 +985,7 @@ def test_unreadable_page_falls_back(tmp_path: Path) -> None:
 
     fetch = _Fetch(_Cfg(), _evidence(), transport=_transport, sleep=lambda _s: None, clock=lambda: 0.0)  # type: ignore[arg-type]
     detail = _item_detail([_fact()])
-    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "222222222_0000000002"))
+    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "333333333_0000000002"))
     try:
         bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
     finally:
@@ -1122,21 +1137,21 @@ def test_reject_policy_drops_conflicting_benchmark(tmp_path: Path) -> None:
 def test_reject_policy_falls_back_to_next_benchmark(tmp_path: Path) -> None:
     order = _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울", unit="조")
     cheap = _detail("222222222_0000000001", price="2400000", terms="서울", region="서울", unit="조")
-    nxt = _detail("222222222_0000000002", price="2508000", terms="서울", region="서울", unit="조")
+    nxt = _detail("333333333_0000000002", price="2508000", terms="서울", region="서울", unit="조")
     bad = (
         "단위 개 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
         "계약 단가 2,400,000원 / 개 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
     )
     good = (
-        "단위 조 물품식별번호 11111111 계약품목관리번호 222222222_0000000002 "
+        "단위 조 물품식별번호 11111111 계약품목관리번호 333333333_0000000002 "
         "계약 단가 2,508,000원 / 조 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
     )
     ds = _bundle_dataset(tmp_path)
     raw = _FakeRaw({order.listing_id: order, cheap.listing_id: cheap, nxt.listing_id: nxt})
     seen: list = []
-    fetch = _fetcher({"222222222_0000000001": (200, bad), "222222222_0000000002": (200, good)}, seen)
+    fetch = _fetcher({"222222222_0000000001": (200, bad), "333333333_0000000002": (200, good)}, seen)
     detail = _item_detail([_fact(unit="조")])
-    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "222222222_0000000002"))
+    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "333333333_0000000002"))
     try:
         bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05"), unit_conflict_policy="reject"), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
     finally:

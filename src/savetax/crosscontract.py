@@ -11,14 +11,22 @@ from decimal import Decimal
 
 from src.savetax.audit import amount_lower_bound_krw
 from src.savetax.competition import ItemDetail, ItemState
-from src.savetax.config import AuditConfig, EvidenceConfig, UnitConflictPolicy
+from src.savetax.config import AuditConfig, EvidenceConfig, UnitConflictPolicy, VariantPolicy
 from src.savetax.dataset import Dataset
-from src.savetax.errors import DataIntegrityError, DomainValidationError
+from src.savetax.errors import ApiError, DataIntegrityError, DomainValidationError
 from src.savetax.evidence import EvidenceBundle, Lane, LineProposal, PriceEvidence, RejectedFact, make_line
 from src.savetax.publicweb import PublicFetcher, visible_text
 from src.savetax.rawapi import ListingDetail, RawApiClient
 from src.savetax.redaction import redact
 from src.savetax.units import UnitRelation, compare_units, reconcile_units
+from src.savetax.variants import (
+    ListingGroup,
+    benchmark_admissible,
+    distinct_prices,
+    fact_tier,
+    is_variant_bearing,
+    representative,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +35,12 @@ __all__ = [
     "ListingPage",
     "build_cross_bundle",
     "find_cross_candidates",
+    "item_listing_groups",
     "parse_listing_page",
     "region_covers",
 ]
+
+_VARIANT_SCOPE_SENTENCE = "비교 계약에 같은 물품 등재가 여러 단가로 있으면 가장 높은 단가의 등재만 비교 단가로 사용하였다."
 
 _CLAIM = "납품요구 기록의 단가가 같은 물품식별번호의 다른 조달계약 단가보다 높게 나타난다."
 _COMPARISON_SCOPE = "같은 물품식별번호의 다른 조달계약 가운데 납품 조건이 같고 요청일에 유효하며 공급 지역이 포함되는 등재를 비교하였다."
@@ -63,6 +74,24 @@ class CrossCandidate:
     order_amount_krw: int
     gap_lower_bound_krw: int
     benchmark_listing_ids: tuple[str, ...]
+    variant_bearing: bool = False
+
+
+def item_listing_groups(dataset: Dataset, item_id: str, audit: AuditConfig) -> dict[str, ListingGroup]:
+    """Return the item's listing groups keyed by contract number."""
+    rows = dataset.connection.execute(
+        "SELECT listing_id, price, contract_no FROM listings WHERE item_id = ? AND price >= CAST(? AS DECIMAL(38, 6))",
+        [item_id, format(audit.min_unit_price_krw, "f")],
+    ).fetchall()
+    bucket: dict[str, list[tuple[str, Decimal]]] = {}
+    for listing_id, price, contract_no in rows:
+        dec = price if isinstance(price, Decimal) else Decimal(str(price))
+        bucket.setdefault(str(contract_no), []).append((str(listing_id), dec))
+    groups: dict[str, ListingGroup] = {}
+    for contract_no, pairs in bucket.items():
+        pairs.sort(key=lambda p: p[0])
+        groups[contract_no] = ListingGroup(contract_no=contract_no, item_id=item_id, listings=tuple(pairs))
+    return groups
 
 
 @dataclass(frozen=True)
@@ -83,6 +112,81 @@ class ListingPage:
 
 def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: AuditConfig) -> list[CrossCandidate]:
     """Return every item with a cheaper cross-contract listing, largest gap first."""
+    if evidence.variant_policy is VariantPolicy.OFF:
+        return _find_cross_candidates_legacy(dataset, evidence, audit)
+    threshold = format(audit.min_unit_price_krw, "f")
+    markup = format(evidence.cross_markup_threshold, "f")
+    query = (
+        "WITH ranked AS ("
+        "SELECT item_id, contract_no, listing_id, price, unit, contract_begin, contract_end, "
+        "ROW_NUMBER() OVER (PARTITION BY item_id, contract_no ORDER BY price DESC, listing_id) AS rn "
+        "FROM listings WHERE price >= CAST(? AS DECIMAL(38, 6))"
+        "), reps AS ("
+        "SELECT item_id, contract_no, listing_id AS rep_id, price AS rep_price, unit AS rep_unit, "
+        "contract_begin AS rep_begin, contract_end AS rep_end FROM ranked WHERE rn = 1"
+        "), gcounts AS ("
+        "SELECT item_id, contract_no, COUNT(DISTINCT price) AS dcnt FROM listings "
+        "WHERE price >= CAST(? AS DECIMAL(38, 6)) GROUP BY item_id, contract_no"
+        "), vbearing AS ("
+        "SELECT item_id, MAX(dcnt) >= 2 AS vb FROM gcounts GROUP BY item_id"
+        "), qualifying AS ("
+        "SELECT k.dlv_key, k.item_id, k.order_amount_krw, k.order_qty, r.rep_id AS listing_id, r.rep_price AS price, "
+        "v.vb AS vb "
+        "FROM order_keys k JOIN reps r ON k.item_id = r.item_id AND lower(trim(k.unit)) = lower(trim(r.rep_unit)) "
+        "AND k.contract_no <> r.contract_no "
+        "JOIN gcounts g ON g.item_id = r.item_id AND g.contract_no = r.contract_no "
+        "JOIN vbearing v ON v.item_id = k.item_id "
+        "WHERE r.rep_begin <= k.last_order_date AND r.rep_end >= k.first_order_date "
+        "AND k.avg_order_unit_price_krw >= r.rep_price * CAST(? AS DECIMAL(38, 12)) "
+        "AND (NOT ? OR NOT v.vb OR g.dcnt >= 2)"
+        "), benchmarks AS ("
+        "SELECT item_id, list(listing_id ORDER BY price, listing_id)[:?] AS ids "
+        "FROM (SELECT DISTINCT item_id, listing_id, price FROM qualifying) GROUP BY item_id"
+        "), cheapest AS ("
+        "SELECT * FROM qualifying QUALIFY row_number() OVER (PARTITION BY dlv_key ORDER BY price, listing_id) = 1"
+        ") SELECT c.item_id, c.order_amount_krw, c.order_qty, c.price, b.ids, c.vb "
+        "FROM cheapest c JOIN benchmarks b USING (item_id)"
+    )
+    rows = dataset.connection.execute(
+        query,
+        [
+            threshold,
+            threshold,
+            markup,
+            evidence.variant_policy is VariantPolicy.STRICT,
+            evidence.max_benchmarks_per_item,
+        ],
+    ).fetchall()
+    benchmark_ids: dict[str, tuple[str, ...]] = {}
+    gaps: dict[str, int] = {}
+    order_totals: dict[str, int] = {}
+    bearing: dict[str, bool] = {}
+    for item, order_amount, order_qty, price, ids, vb in rows:
+        gap = amount_lower_bound_krw(int(order_amount), int(order_qty), Decimal(str(price)))
+        gaps[item] = gaps.get(item, 0) + gap
+        order_totals[item] = order_totals.get(item, 0) + order_amount
+        benchmark_ids[item] = tuple(ids)
+        bearing[item] = bool(vb)
+    candidates: list[CrossCandidate] = []
+    for item, gap in gaps.items():
+        if gap < evidence.min_item_expected_krw:
+            continue
+        candidates.append(
+            CrossCandidate(
+                item_id=item,
+                order_amount_krw=order_totals.get(item, 0),
+                gap_lower_bound_krw=gap,
+                benchmark_listing_ids=benchmark_ids[item],
+                variant_bearing=bearing.get(item, False),
+            )
+        )
+    candidates.sort(key=lambda c: (-c.gap_lower_bound_krw, c.item_id))
+    return candidates
+
+
+def _find_cross_candidates_legacy(
+    dataset: Dataset, evidence: EvidenceConfig, audit: AuditConfig
+) -> list[CrossCandidate]:
     rows = dataset.connection.execute(
         "WITH qualifying AS ("
         "SELECT k.dlv_key, k.item_id, k.order_amount_krw, k.order_qty, b.listing_id, b.price "
@@ -96,22 +200,29 @@ def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: Aud
         "FROM (SELECT DISTINCT item_id, listing_id, price FROM qualifying) GROUP BY item_id"
         "), cheapest AS ("
         "SELECT * FROM qualifying QUALIFY row_number() OVER (PARTITION BY dlv_key ORDER BY price, listing_id) = 1"
-        ") SELECT c.item_id, c.order_amount_krw, c.order_qty, c.price, b.ids "
-        "FROM cheapest c JOIN benchmarks b USING (item_id)",
+        "), bearing AS ("
+        "SELECT item_id, bool_or(dcnt >= 2) AS vb FROM ("
+        "SELECT item_id, contract_no, count(DISTINCT price) AS dcnt FROM listings "
+        "WHERE price >= CAST(? AS DECIMAL(38, 6)) GROUP BY item_id, contract_no) GROUP BY item_id"
+        ") SELECT c.item_id, c.order_amount_krw, c.order_qty, c.price, b.ids, v.vb "
+        "FROM cheapest c JOIN benchmarks b USING (item_id) JOIN bearing v USING (item_id)",
         [
             format(audit.min_unit_price_krw, "f"),
             format(evidence.cross_markup_threshold, "f"),
             evidence.max_benchmarks_per_item,
+            format(audit.min_unit_price_krw, "f"),
         ],
     ).fetchall()
     benchmark_ids: dict[str, tuple[str, ...]] = {}
     gaps: dict[str, int] = {}
     order_totals: dict[str, int] = {}
-    for item, order_amount, order_qty, price, ids in rows:
+    bearing: dict[str, bool] = {}
+    for item, order_amount, order_qty, price, ids, vb in rows:
         gap = amount_lower_bound_krw(int(order_amount), int(order_qty), Decimal(str(price)))
         gaps[item] = gaps.get(item, 0) + gap
         order_totals[item] = order_totals.get(item, 0) + order_amount
         benchmark_ids[item] = tuple(ids)
+        bearing[item] = bool(vb)
     candidates: list[CrossCandidate] = []
     for item, gap in gaps.items():
         if gap < evidence.min_item_expected_krw:
@@ -122,6 +233,7 @@ def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: Aud
                 order_amount_krw=order_totals.get(item, 0),
                 gap_lower_bound_krw=gap,
                 benchmark_listing_ids=benchmark_ids[item],
+                variant_bearing=bearing[item],
             )
         )
     candidates.sort(key=lambda c: (-c.gap_lower_bound_krw, c.item_id))
@@ -307,6 +419,7 @@ def build_cross_bundle(
     *,
     today: date,
     on_unit_conflict: Callable[[dict[str, str]], None] | None = None,
+    on_variant_result: Callable[[bool, int], None] | None = None,
 ) -> EvidenceBundle | None:
     """Return the bundle of admissible facts for one item, or None when the total is below the minimum."""
     if detail.state is not ItemState.AVAILABLE:
@@ -319,18 +432,60 @@ def build_cross_bundle(
             rejected.append(RejectedFact(fact.fact_id, "not_scorable"))
         elif fact.request_date is None:
             rejected.append(RejectedFact(fact.fact_id, "no_request_date"))
+    groups = item_listing_groups(dataset, candidate.item_id, audit)
+    variant_bearing = is_variant_bearing(groups.values())
+    multi_groups = sum(1 for g in groups.values() if len(distinct_prices(g)) >= 2)
+    logger.info(
+        "[EVIDENCE] item_id=%s variant_bearing=%s groups=%d multi_groups=%d policy=%s",
+        redact(candidate.item_id),
+        variant_bearing,
+        len(groups),
+        multi_groups,
+        evidence.variant_policy.value,
+    )
+    if on_variant_result is not None:
+        on_variant_result(variant_bearing, 0)
     live_facts = [f for f in detail.facts if f.scorable and f.request_date is not None]
     if not live_facts:
         logger.info(
             "[EVIDENCE] item_id=%s lane=cross lines=0 rejected=%d expected_krw=0",
-            redact(candidate.item_id),
-            len(rejected),
+            redact(candidate.item_id), len(rejected),
         )
         return None
+    use_variant_gate = evidence.variant_policy is not VariantPolicy.OFF
+    rep_id_by_contract: dict[str, str] = {}
+    lid_to_contract: dict[str, str] = {}
+    if use_variant_gate:
+        for contract_no, group in groups.items():
+            if group.listings:
+                rid, _ = representative(group)
+                rep_id_by_contract[contract_no] = rid
+            for lid, _ in group.listings:
+                lid_to_contract[lid] = contract_no
+    wanted_ids = candidate.benchmark_listing_ids
+    if use_variant_gate:
+        rep_ids = set(rep_id_by_contract.values())
+        wanted_ids = tuple(
+            lid for lid in candidate.benchmark_listing_ids if lid in rep_ids
+        )
+        if variant_bearing and evidence.variant_policy is VariantPolicy.STRICT:
+            diagnostic_ids = tuple(
+                representative(group)[0]
+                for group in groups.values()
+                if len(distinct_prices(group)) == 1
+                and any(
+                    fact.contract_no != group.contract_no
+                    and fact.unit_price_krw >= representative(group)[1] * evidence.cross_markup_threshold
+                    for fact in live_facts
+                )
+            )
+            wanted_ids = tuple(dict.fromkeys((*wanted_ids, *diagnostic_ids)))
     benchmarks: list[ListingDetail] = []
-    for listing_id in candidate.benchmark_listing_ids:
+    for listing_id in wanted_ids:
         got = raw.get_listing(listing_id)
         if got is None or got.item_id != candidate.item_id or got.listing_id != listing_id:
+            continue
+        if use_variant_gate and got.contract_no != lid_to_contract[listing_id]:
             continue
         if got.price_kind == "catalog_reference":
             continue
@@ -339,15 +494,50 @@ def build_cross_bundle(
         if got.contract_begin is None or got.contract_end is None:
             continue
         benchmarks.append(got)
+    if use_variant_gate:
+        verified: list[ListingDetail] = []
+        for bench in benchmarks:
+            bench_contract = lid_to_contract[bench.listing_id]
+            bench_group = groups[bench_contract]
+            if len(distinct_prices(bench_group)) < 2:
+                verified.append(bench)
+                continue
+            drop = False
+            for sib_id, _ in bench_group.listings:
+                if sib_id == bench.listing_id:
+                    continue
+                try:
+                    sib = raw.get_listing(sib_id)
+                except (ApiError, DataIntegrityError):
+                    drop = True
+                    break
+                if (
+                    sib is None
+                    or sib.listing_id != sib_id
+                    or sib.item_id != candidate.item_id
+                    or sib.contract_no != bench.contract_no
+                    or sib.price_krw > bench.price_krw
+                ):
+                    drop = True
+                    break
+            if not drop:
+                verified.append(bench)
+        benchmarks = verified
     page_failed: set[str] = set()
     page_cache: dict[str, ListingPage] = {}
     lines: list[LineProposal] = []
+    cited_ids: list[str] = []
     caveats: list[str] = []
     unit_notes: list[str] = []
     unit_note_keys: set[tuple[str, str]] = set()
     conflict_keys: set[tuple[str, str, str]] = set()
     release = next((b.release for b in benchmarks if b.release), "자료 접근 대기")
     for fact in live_facts:
+        fact_group = groups.get(fact.contract_no)
+        if fact_group is None:
+            rejected.append(RejectedFact(fact.fact_id, "order_listing_not_served"))
+            continue
+        tier = fact_tier(fact_group, fact.unit_price_krw)
         order_rows = _order_listings(dataset, candidate.item_id, fact.contract_no)
         if not order_rows:
             rejected.append(RejectedFact(fact.fact_id, "order_listing_not_served"))
@@ -389,6 +579,7 @@ def build_cross_bundle(
         chosen_page: ListingPage | None = None
         chosen_rec = None
         failure_reason = "no_admissible_benchmark"
+        variant_blocked = False
         while pool:
             admissible: list[ListingDetail] = []
             for b in pool:
@@ -406,8 +597,17 @@ def build_cross_bundle(
                     continue
                 if fact.unit_price_krw < b.price_krw * evidence.cross_markup_threshold:
                     continue
+                if use_variant_gate:
+                    b_group = groups[b.contract_no]
+                    if not benchmark_admissible(
+                        evidence.variant_policy, variant_bearing, tier, b_group
+                    ):
+                        variant_blocked = True
+                        continue
                 admissible.append(b)
             if not admissible:
+                if variant_blocked and failure_reason == "no_admissible_benchmark":
+                    failure_reason = "variant_unresolved"
                 break
             admissible.sort(key=lambda b: (b.price_krw, b.listing_id))
             top = admissible[0]
@@ -426,6 +626,7 @@ def build_cross_bundle(
             url = evidence.listing_page_url_template.format(listing_id=top.listing_id)
             page = fetcher.get(url)
             if page.status != 200:
+                failure_reason = "page_unreadable"
                 page_failed.add(top.listing_id)
                 pool = [b for b in pool if b.listing_id != top.listing_id]
                 if not pool:
@@ -435,18 +636,21 @@ def build_cross_bundle(
             try:
                 parsed = parse_listing_page(visible_text(page.text))
             except DataIntegrityError:
+                failure_reason = "page_unparseable"
                 page_failed.add(top.listing_id)
                 pool = [b for b in pool if b.listing_id != top.listing_id]
                 if not pool:
                     rejected.append(RejectedFact(fact.fact_id, "page_unparseable"))
                 continue
             if parsed.listing_id != top.listing_id or parsed.item_id != candidate.item_id:
+                failure_reason = "page_identity_mismatch"
                 page_failed.add(top.listing_id)
                 pool = [b for b in pool if b.listing_id != top.listing_id]
                 if not pool:
                     rejected.append(RejectedFact(fact.fact_id, "page_identity_mismatch"))
                 continue
             if Decimal(parsed.unit_price_krw) != top.price_krw:
+                failure_reason = "page_price_mismatch"
                 page_failed.add(top.listing_id)
                 pool = [b for b in pool if b.listing_id != top.listing_id]
                 if not pool:
@@ -504,6 +708,7 @@ def build_cross_bundle(
             rejected.append(RejectedFact(fact.fact_id, "no_admissible_benchmark"))
             continue
         lines.append(line)
+        cited_ids.append(chosen.listing_id)
         if _annotation is not None and _display_unit is not None:
             _key = (chosen.listing_id, _display_unit)
             if _key not in unit_note_keys:
@@ -516,6 +721,8 @@ def build_cross_bundle(
         if not price_matched:
             caveats.append(f"주문 단가 불일치로 계약 전체 조건을 사용: {fact.fact_id}")
     total = sum(line.expected_krw for line in lines)
+    if on_variant_result is not None:
+        on_variant_result(variant_bearing, sum(r.reason == "variant_unresolved" for r in rejected))
     logger.info(
         "[EVIDENCE] item_id=%s lane=cross lines=%d rejected=%d expected_krw=%d",
         redact(candidate.item_id),
@@ -525,17 +732,38 @@ def build_cross_bundle(
     )
     if lines and total < evidence.min_item_expected_krw:
         return None
-    if not lines and not any(r.reason == "unit_display_conflict" for r in rejected):
+    if not lines and not any(r.reason in ("unit_display_conflict", "variant_unresolved") for r in rejected):
         return None
     ratios = [line.fact_unit_price_krw / line.benchmark_unit_price_krw for line in lines]
-    title = f"같은 물품의 다른 계약 단가 대비 {max(ratios):.2f}배" if ratios else "단위 표기 충돌로 비교 제외"
+    title = (
+        f"같은 물품의 다른 계약 단가 대비 {max(ratios):.2f}배" if ratios
+        else "변형 구분 불확실로 비교 제외" if any(r.reason == "variant_unresolved" for r in rejected)
+        else "단위 표기 충돌로 비교 제외"
+    )
     notes = _REPRODUCTION_NOTES.format(version=dataset.version, release=release)
+    comparison_scope = _COMPARISON_SCOPE
+    if use_variant_gate and variant_bearing:
+        comparison_scope = f"{_COMPARISON_SCOPE} {_VARIANT_SCOPE_SENTENCE}"
+        cited: dict[str, str] = {}
+        for match_id in cited_ids:
+            match_contract = lid_to_contract.get(match_id)
+            if match_contract is not None:
+                cited.setdefault(match_contract, match_id)
+        for cited_contract in sorted(cited):
+            cited_group = groups.get(cited_contract)
+            if cited_group is None or len(distinct_prices(cited_group)) < 2:
+                continue
+            prices = distinct_prices(cited_group)
+            caveats.append(
+                f"등재 단가 복수: 계약 {cited_contract} 등재 {len(cited_group.listings)}건 "
+                f"({prices[0]:,f}원 ~ {prices[-1]:,f}원), 최고가 {cited[cited_contract]} 사용"
+            )
     bundle = EvidenceBundle(
         item_id=candidate.item_id,
         lane=Lane.CROSS_CONTRACT,
         title=title,
         claim=_CLAIM,
-        comparison_scope=_COMPARISON_SCOPE,
+        comparison_scope=comparison_scope,
         reproduction_notes=notes,
         lines=tuple(lines),
         rejected=tuple(rejected),

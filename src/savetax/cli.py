@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from src.savetax.writehttp import WriteTransport
 
 from src.savetax.competition import CompetitionClient, ItemState
-from src.savetax.config import AuditConfig, EvidenceConfig, SaveTaxConfig, UnitConflictPolicy, load_token
+from src.savetax.config import AuditConfig, EvidenceConfig, SaveTaxConfig, UnitConflictPolicy, VariantPolicy, load_token
 from src.savetax.crosscontract import build_cross_bundle, find_cross_candidates
 from src.savetax.dataset import Dataset
 from src.savetax.errors import ApiError, ConfigError, DataAccessPending, NetworkError, SaveTaxError, SubmissionPending
@@ -72,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--out-dir", type=Path)
     evidence.add_argument("--include-review", action="store_true")
     evidence.add_argument("--unit-policy", choices=("annotate", "reject"), default="annotate")
+    evidence.add_argument("--variant-policy", choices=("strict", "allow_low_fact", "off"), default="strict")
     review = sub.add_parser("review")
     review.add_argument("--drafts-dir", type=Path)
     review.add_argument("--limit", type=int)
@@ -201,6 +202,7 @@ def _run_cross_lane(
     unit_conflicts: list[dict[str, str]],
 ) -> tuple[int, int, int]:
     bundles: list[EvidenceBundle] = []
+    variant_results: dict[str, tuple[bool, int]] = {}
     candidates_n = 0
     available_n = 0
     drafts = 0
@@ -219,9 +221,15 @@ def _run_cross_lane(
         for candidate in available[:limit]:
             try:
                 detail = competition.get_item(candidate.item_id)
+                def record_variant_result(
+                    bearing: bool, unresolved: int, item_id: str = candidate.item_id,
+                ) -> None:
+                    variant_results[item_id] = (bearing, unresolved)
+
                 bundle = build_cross_bundle(
                     candidate, detail, dataset, raw, fetcher, evidence, audit,
                     today=today, on_unit_conflict=unit_conflicts.append,
+                    on_variant_result=record_variant_result,
                 )
                 if bundle is None:
                     continue
@@ -246,6 +254,14 @@ def _run_cross_lane(
             len(bundles),
             drafts,
             expected,
+        )
+        variant_unresolved = sum(result[1] for result in variant_results.values())
+        variant_items = sum(result[0] for result in variant_results.values())
+        logger.info(
+            "[EVIDENCE] variant_unresolved=%d variant_bearing_items=%d policy=%s",
+            variant_unresolved,
+            variant_items,
+            evidence.variant_policy.value,
         )
     return candidates_n, available_n, drafts
 
@@ -341,6 +357,7 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
         unit_conflict_policy=(
             UnitConflictPolicy.REJECT if args.unit_policy == "reject" else UnitConflictPolicy.ANNOTATE
         ),
+        variant_policy=VariantPolicy(args.variant_policy),
     )
     audit = AuditConfig()
     out_dir = args.out_dir if args.out_dir is not None else evidence.evidence_dir
