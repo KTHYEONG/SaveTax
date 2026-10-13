@@ -55,3 +55,12 @@ def test_error_metadata_cannot_leak_tokens() -> None:
     for error in (net, api):
         assert token not in repr(error)
         assert token not in str(vars(error))
+
+
+def test_api_context_retains_structure_and_redacts_nested_tokens() -> None:
+    token = "savetax_secret_123"
+    error = ApiError("competition", 409, "PRODUCT_ALREADY_CLAIMED", "taken", False,
+                     request_id=token, context={"claimed_by_me": True, "nested": [{token: token}]})
+    assert error.context == {"claimed_by_me": True, "nested": [{"<redacted>": "<redacted>"}]}
+    assert error.request_id == "<redacted>"
+    assert token not in str(vars(error))

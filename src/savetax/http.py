@@ -101,7 +101,10 @@ def _read_body(read: Callable[[], bytes]) -> bytes:
 
 def _host_and_path(url: str) -> tuple[str, str]:
     parsed = urlparse(url)
-    return parsed.hostname or parsed.netloc, parsed.path or "/"
+    path = parsed.path or "/"
+    if "/submission-requests/" in path:
+        path = path.split("/submission-requests/", 1)[0] + "/submission-requests/<redacted>"
+    return parsed.hostname or parsed.netloc, path
 
 
 def _log_attempt(stage: NetworkStage, host: str) -> None:

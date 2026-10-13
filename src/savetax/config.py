@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import NoReturn, SupportsIndex
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from src.savetax.errors import ConfigError, CredentialError
 
@@ -71,6 +71,18 @@ def _check_parsed_url(value: str, field_name: str) -> None:
         raise ConfigError(f"[SYS] invalid {field_name}: fragment is forbidden")
     if parsed.port not in (None, 443):
         raise ConfigError(f"[SYS] invalid {field_name}: unsupported HTTPS port")
+    opaque_prefix = "/v1/events/current/submission-requests/"
+    if parsed.hostname == "hackathon.savetax.now" and parsed.path.startswith(opaque_prefix):
+        encoded = parsed.path[len(opaque_prefix) :]
+        key = unquote(encoded)
+        if (
+            not 1 <= len(key) <= 128
+            or any(not 33 <= ord(char) <= 126 for char in key)
+            or encoded != quote(key, safe="").replace(".", "%2E")
+            or parsed.query
+        ):
+            raise ConfigError(f"[SYS] invalid {field_name}: malformed request key path")
+        return
     path = unquote(parsed.path)
     if ".." in path.split("/") or "%" in path or "\\" in path:
         raise ConfigError(f"[SYS] invalid {field_name}: dot-dot path segment is forbidden")
@@ -412,10 +424,7 @@ class EvidenceConfig:
 
     def public_hosts(self) -> frozenset[str]:
         """Return every host a credential-less page fetch may target."""
-        hosts = {
-            urlparse(getattr(self, field_name)).hostname or ""
-            for field_name, _ in _TEMPLATE_PLACEHOLDERS
-        }
+        hosts = {urlparse(getattr(self, field_name)).hostname or "" for field_name, _ in _TEMPLATE_PLACEHOLDERS}
         hosts.update(shop.host.lower() for shop in self.shops)
         hosts.discard("")
         return frozenset(hosts)

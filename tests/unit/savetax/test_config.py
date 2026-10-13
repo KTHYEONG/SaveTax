@@ -268,3 +268,8 @@ def test_unit_policy_defaults_to_annotate() -> None:
 def test_invalid_unit_policy_fails_closed() -> None:
     with pytest.raises(ConfigError, match="unit_conflict_policy"):
         _evidence(unit_conflict_policy="ignore")
+@pytest.mark.parametrize("encoded", ["", "../x", "%", "%FF", "has%20space", "A/B", "..", "K?query"])
+def test_request_key_path_requires_canonical_encoding(encoded: str) -> None:
+    assert not SaveTaxConfig().allows_credential(
+        "https://hackathon.savetax.now/v1/events/current/submission-requests/" + encoded
+    )

@@ -282,3 +282,15 @@ def test_programming_errors_are_not_retried_or_misclassified() -> None:
     with pytest.raises(ValueError, match="programming defect"):
         client.get("https://api.savetax.now/v1/me", authenticated=False)
     assert sleeps == []
+
+
+def test_request_resolution_retry_never_logs_key(caplog: pytest.LogCaptureFixture) -> None:
+    key = "private-key"
+
+    def down(url: str, headers: object, timeout: float) -> HttpResponse:
+        raise OSError("connection failed")
+
+    client = HttpClient(SaveTaxConfig(), Secret(TOKEN), transport=down, sleep=lambda _s: None)
+    with caplog.at_level("DEBUG"), pytest.raises(NetworkError):
+        client.get(f"https://hackathon.savetax.now/v1/events/current/submission-requests/{key}", authenticated=True)
+    assert key not in caplog.text
