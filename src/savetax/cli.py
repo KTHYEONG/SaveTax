@@ -66,7 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--out-dir", type=Path)
     screen.add_argument("--online", action="store_true")
     evidence = sub.add_parser("evidence")
-    evidence.add_argument("--lane", choices=("cross", "retail", "all"), default="cross")
+    evidence.add_argument("--lane", choices=("cross", "retail", "agency", "all"), default="cross")
     evidence.add_argument("--limit", type=int, default=50)
     evidence.add_argument("--items")
     evidence.add_argument("--batch", type=int, default=0)
@@ -362,6 +362,66 @@ def _run_retail_lane(
     return candidates_n, available_n, drafts
 
 
+def _run_agency_lane(
+    competition: CompetitionClient,
+    raw: RawApiClient,
+    fetcher: PublicFetcher,
+    evidence: EvidenceConfig,
+    audit: AuditConfig,
+    out_dir: Path,
+    dataset: Dataset,
+    wanted: list[str] | None,
+    limit: int,
+    include_review: bool,
+) -> tuple[int, int, int]:
+    from src.savetax.agencylane import build_agency_bundle, find_agency_candidates
+
+    bundles: list[EvidenceBundle] = []
+    candidates_n = 0
+    available_n = 0
+    drafts = 0
+    try:
+        found = find_agency_candidates(dataset, evidence, audit, items=wanted)
+        candidates_n = len(found)
+        ids = [c.item_id for c in found]
+        states = {result.input: result.state for result in competition.lookup_items(ids)}
+        available = [c for c in found if states.get(c.item_id) is ItemState.AVAILABLE]
+        available_n = len(available)
+        event = competition.get_event()
+        today = date.today()
+        for candidate in available[:limit]:
+            try:
+                detail = competition.get_item(candidate.item_id)
+                bundle = build_agency_bundle(
+                    candidate, detail, dataset, raw, fetcher, evidence, audit, today=today
+                )
+                if bundle is None:
+                    continue
+                bundles.append(bundle)
+                if bundle.review_required and not include_review:
+                    continue
+                body = build_draft_body(bundle, event, evidence)
+                write_draft(body, Path(out_dir) / "drafts" / "agency" / f"{bundle.item_id}.json")
+                drafts += 1
+            except (DataAccessPending, NetworkError):
+                raise
+            except SaveTaxError as exc:
+                logger.info("[EVIDENCE] item_id=%s skipped=%s", redact(candidate.item_id), redact(str(exc)))
+                continue
+    finally:
+        write_bundles(bundles, Path(out_dir) / "agency-bundles.jsonl")
+        expected = sum(b.expected_total_krw for b in bundles)
+        logger.info(
+            "[EVIDENCE] lane=agency candidates=%d available=%d bundles=%d drafts=%d expected_krw=%d",
+            candidates_n,
+            available_n,
+            len(bundles),
+            drafts,
+            expected,
+        )
+    return candidates_n, available_n, drafts
+
+
 def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, transport: Transport | None) -> int:
     limit = args.limit
     if limit is None or limit < 1:
@@ -396,6 +456,8 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
         wanted = list(dict.fromkeys(wanted))
     records: list[dict[str, str]] = []
     owned = bool(getattr(args, "owned", False))
+    if owned and args.lane == "agency":
+        raise ConfigError("[SYS] owned mode rejects the agency lane")
     conflict_dir = Path(out_dir) / "remediation" if owned else Path(out_dir)
     try:
         with Dataset(config, audit) as dataset:
@@ -420,6 +482,11 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
                         competition, raw, fetcher, evidence, audit, Path(out_dir),
                         dataset, wanted, limit, args.include_review, handle, batch,
                         batches, separate_drafts=args.lane == "all",
+                    )
+                if args.lane == "agency":
+                    _run_agency_lane(
+                        competition, raw, fetcher, evidence, audit, Path(out_dir),
+                        dataset, wanted, limit, args.include_review,
                     )
     finally:
         _append_unit_conflicts(conflict_dir, records)
@@ -460,6 +527,20 @@ def _live_price(fetcher: PublicFetcher, url: str) -> int | None:
         return None
 
 
+def _live_row_prices(fetcher: PublicFetcher, url: str) -> frozenset[int]:
+    from src.savetax.listingrows import parse_delivery_rows
+
+    try:
+        page = fetcher.get(url)
+        if page.status != 200 or not page.text:
+            return frozenset()
+        return frozenset(row.unit_price_krw for row in parse_delivery_rows(page.text).rows)
+    except NetworkError:
+        raise
+    except (SaveTaxError, ValueError):
+        return frozenset()
+
+
 def _refusing_write_transport(
     method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float
 ) -> HttpResponse:
@@ -472,7 +553,8 @@ def _workflow_inputs(
     from src.savetax.workflow import load_bundles, load_drafts
 
     drafts = load_drafts(drafts_dir)
-    bundles = load_bundles([evidence_dir / "cross-bundles.jsonl", evidence_dir / "retail-bundles.jsonl"], now=now)
+    bundles = load_bundles([evidence_dir / "cross-bundles.jsonl", evidence_dir / "retail-bundles.jsonl",
+                            evidence_dir / "agency-bundles.jsonl"], now=now)
     from src.savetax.workflow import matching_bundle
 
     if any(item not in bundles for item, _ in drafts):
@@ -491,7 +573,8 @@ def _single_draft(path: Path, evidence_dir: Path, now: datetime) -> list[tuple[s
 
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
-        bundles = load_bundles([evidence_dir / "cross-bundles.jsonl", evidence_dir / "retail-bundles.jsonl"], now=now)
+        bundles = load_bundles([evidence_dir / "cross-bundles.jsonl", evidence_dir / "retail-bundles.jsonl",
+                                evidence_dir / "agency-bundles.jsonl"], now=now)
         item = body["canonical_product_id"]
         bundle = matching_bundle(body, bundles)
     except (ValueError, TypeError, KeyError, OSError):
@@ -621,7 +704,8 @@ def _run_submit(
     _, code = run_submit(
         joined, event=competition.get_event(), status=competition.get_me(),
         competition=competition, submission_client=submissions, ledger=ledger,
-        fetch_price=lambda url: _live_price(fetcher, url), now=now,
+        fetch_price=lambda url: _live_price(fetcher, url),
+        fetch_row_prices=lambda url: _live_row_prices(fetcher, url), now=now,
         ttl=timedelta(hours=approval.ttl_hours),
         reserve=approval.reserve_claims, execute=True, limit=args.limit, sleep=time.sleep,
         poll_seconds=approval.lint_poll_seconds, timeout_seconds=approval.lint_timeout_seconds,
@@ -686,6 +770,7 @@ def _run_revise(
                          ttl=timedelta(hours=approval.ttl_hours), execute=True,
                          bundle=bundle, event=competition.get_event(),
                          fetch_price=lambda url: _live_price(fetcher, url),
+                         fetch_row_prices=lambda url: _live_row_prices(fetcher, url),
                          clock=_utcnow, event_provider=competition.get_event)
     return 0 if receipt is not None else 2
 
@@ -1017,6 +1102,7 @@ def _run_remediate_run(
         pause_seconds=approval.pause_between_submits_seconds,
         stop_after_consecutive_suspect=approval.stop_after_consecutive_suspect,
         fetch_price=lambda url: _live_price(fetcher, url), event_provider=competition.get_event,
+        fetch_row_prices=lambda url: _live_row_prices(fetcher, url),
         clock=_utcnow, sleep=time.sleep, out=out,
     )
     return 0

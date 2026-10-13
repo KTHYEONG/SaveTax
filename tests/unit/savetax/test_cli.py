@@ -1894,3 +1894,376 @@ def test_conflict_audit_survives_bundle_threshold(tmp_path: Path, monkeypatch: A
                 environ={"SAVETAX_TOKEN": TOKEN}, transport=_conflict_transport([])) == 0
     assert (out / "cross-bundles.jsonl").read_text() == ""
     assert len((out / "unit-conflicts.jsonl").read_text().splitlines()) == 1
+
+
+_AGENCY_ITEM = "99999999"
+_AGENCY_LID = "111111111_0000000001"
+_AGENCY_CONTRACT = "111111111_0"
+
+
+def _agency_rows() -> list[dict[str, Any]]:
+    return [
+        _base_row(
+            listing_id=_AGENCY_LID,
+            item_id=_AGENCY_ITEM,
+            price=100000,
+            dlv_key=7,
+            dlv_lines=1,
+            dlv_qty=10,
+            dlv_unit="대",
+            dlv_amount=950000,
+        )
+    ]
+
+
+def _agency_fact() -> dict:
+    return {
+        "fact_id": "F1",
+        "listing_id": _AGENCY_LID,
+        "contract_no": _AGENCY_CONTRACT,
+        "request_no": "R25TA000001",
+        "line_no": "1",
+        "request_date": "2025-10-12",
+        "unit": "대",
+        "tax_basis": "vat_included",
+        "basis_id": "basis:대:vat_included",
+        "period_kind": "none",
+        "unit_price_krw": "100000",
+        "quantity": "10",
+        "comparable_amount_krw": "1000000",
+        "scorable": True,
+        "exclusion_reasons": [],
+    }
+
+
+def _agency_delivery_rows() -> list[dict]:
+    def _row(req: str, line: int, day: str, agency: str, qty: int, price: int) -> dict:
+        return {
+            "finalRequest": "Y",
+            "requestNo": req,
+            "lineNo": line,
+            "requestDate": day,
+            "agencyName": agency,
+            "unit": "대",
+            "quantity": qty,
+            "unitPrice": price,
+            "contractUnitPrice": 100000,
+            "amount": qty * price,
+        }
+
+    return [
+        _row("R25TA000001", 1, "2025-10-12", "A시청", 10, 100000),
+        _row("R25TA000002", 1, "2025-09-12", "B구청", 5, 60000),
+        _row("R25TA000003", 1, "2025-11-21", "C시청", 8, 70000),
+    ]
+
+
+def _agency_page() -> bytes:
+    head = (
+        f"단위 대 물품식별번호 {_AGENCY_ITEM} 계약품목관리번호 {_AGENCY_LID} "
+        "계약 단가 100,000원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P "
+        "납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
+    )
+    table = (
+        "<table>"
+        "<tr><td>A시청</td><td>2025.10.12</td><td>10 대</td>"
+        "<td>100,000원</td><td>1,000,000원</td><td>R25TA000001</td></tr>"
+        "<tr><td>B구청</td><td>2025.09.12</td><td>5 대</td>"
+        "<td>60,000원</td><td>300,000원</td><td>R25TA000002</td></tr>"
+        "<tr><td>C시청</td><td>2025.11.21</td><td>8 대</td>"
+        "<td>70,000원</td><td>560,000원</td><td>R25TA000003</td></tr>"
+        "</table>"
+    )
+    return f"<html><body>{head} {table}</body></html>".encode()
+
+
+def _agency_transport(calls: list, *, item_state: str = "available", name: str = "패널") -> Any:
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "r",
+                    "ruleset_version": "v",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "c",
+                },
+            )
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": item_state} for i in ids]})
+        if "/events/current/items/" in url and "/lookup" not in url:
+            body = _evidence_item_body(_AGENCY_ITEM, item_state)
+            body["snapshot"]["name"] = name
+            body["facts"] = [_agency_fact()]
+            return _resp(200, body)
+        if "/listings/" in url and "/deliveries" in url:
+            return _resp(200, {"data": {"rows": _agency_delivery_rows(), "page": {"hasMore": False}}})
+        if "savetax.now/listing/" in url:
+            return HttpResponse(status=200, headers={}, body=_agency_page(), elapsed_seconds=0.01)
+        raise AssertionError(f"unexpected url {url}")
+
+    return transport
+
+
+def test_agency_lane_writes_its_own_files(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    out_dir = tmp_path / "ev"
+    calls: list = []
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport(calls),
+    )
+    assert code == 0
+    lines = (out_dir / "agency-bundles.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["lane"] == "agency"
+    assert (out_dir / "drafts" / "agency" / f"{_AGENCY_ITEM}.json").exists()
+    assert not (out_dir / "cross-bundles.jsonl").exists()
+
+
+def test_agency_review_required_bundle_needs_the_flag(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    out_plain = tmp_path / "ev-plain"
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", str(out_plain), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport([], name="패널 600 1200~4880"),
+    )
+    assert code == 0
+    assert not (out_plain / "drafts" / "agency" / f"{_AGENCY_ITEM}.json").exists()
+    out_flag = tmp_path / "ev-flag"
+    code2 = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", str(out_flag), "--data-dir", str(data_dir), "--include-review"],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport([], name="패널 600 1200~4880"),
+    )
+    assert code2 == 0
+    assert (out_flag / "drafts" / "agency" / f"{_AGENCY_ITEM}.json").exists()
+
+
+def test_agency_claimed_item_is_skipped(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport(calls, item_state="claimed"),
+    )
+    assert code == 0
+    assert not any("/events/current/items/" in u for u in calls if "/lookup" not in u)
+
+
+def test_agency_review_loads_agency_bundles(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", "scratch/evidence", "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport(calls),
+    )
+    assert code == 0
+
+    def read(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current"):
+            return _resp(200, {"dataset_release_id": "r", "ruleset_version": "v", "phase": "open",
+                               "opens_at": "2026-10-01T00:00:00Z", "closes_at": "2026-11-01T00:00:00Z",
+                               "evidence_format": "v2", "item_catalog": "c"})
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": "available"} for i in ids]})
+        raise AssertionError(f"unexpected GET {url}")
+
+    def write(method: str, url: str, headers: object, body: bytes | None, timeout: float) -> HttpResponse:
+        draft = json.loads((Path("scratch/evidence/drafts/agency") / f"{_AGENCY_ITEM}.json").read_text(encoding="utf-8"))
+        total = 300000
+        assert draft["canonical_product_id"] == _AGENCY_ITEM
+        if url.endswith("/events/current/submissions/preview"):
+            return _resp(200, {"ok": True, "total_amount_krw": total, "line_amounts_krw": {},
+                               "next_action": "submit", "product_already_claimed": False, "claimed_by_me": False})
+        raise AssertionError(f"unexpected POST {url}")
+
+    assert main(["review"], environ={"SAVETAX_TOKEN": TOKEN}, transport=read, write_transport=write) == 0  # type: ignore[arg-type]
+    assert _AGENCY_ITEM in capsys.readouterr().out
+
+
+def test_agency_submit_passes_the_row_fetcher(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    calls: list = []
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", "scratch/evidence", "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport(calls),
+    )
+    assert code == 0
+
+    posts: list = []
+
+    def read(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current"):
+            return _resp(200, {"dataset_release_id": "r", "ruleset_version": "v", "phase": "open",
+                               "opens_at": "2026-10-01T00:00:00Z", "closes_at": "2026-11-01T00:00:00Z",
+                               "evidence_format": "v2", "item_catalog": "c"})
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": "available"} for i in ids]})
+        if "/events/current/submissions/" in url:
+            return _resp(200, {"submission_id": "SID1", "item_id": _AGENCY_ITEM, "submission_state": "accepted",
+                               "current_revision": 1, "amount_krw": 300000, "lint_status": "clean"})
+        if "savetax.now/listing/" in url:
+            return HttpResponse(status=200, headers={}, body=_agency_page(), elapsed_seconds=0.01)
+        raise AssertionError(f"unexpected GET {url}")
+
+    def write(method: str, url: str, headers: object, body: bytes | None, timeout: float) -> HttpResponse:
+        posts.append(url)
+        if url.endswith("/events/current/submissions/preview"):
+            return _resp(200, {"ok": True, "total_amount_krw": 300000, "line_amounts_krw": {},
+                               "next_action": "submit", "product_already_claimed": False, "claimed_by_me": False})
+        if url.endswith("/events/current/submissions"):
+            return _resp(201, {"submission_id": "SID1", "revision": 1, "submission_state": "accepted",
+                               "amount_krw": 300000, "lint_status": "clean"})
+        raise AssertionError(f"unexpected POST {url}")
+
+    kwargs: dict[str, Any] = {"environ": {"SAVETAX_TOKEN": TOKEN}, "transport": read, "write_transport": write}
+    assert main(["review"], **kwargs) == 0  # type: ignore[arg-type]
+    challenge = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("total=")).split("challenge=")[1]
+    assert main(["approve", "--challenge", challenge, "--note", "agency ok"], **kwargs) == 0  # type: ignore[arg-type]
+    posts.clear()
+    assert main(["submit", "--execute"], **kwargs) == 0  # type: ignore[arg-type]
+    assert any(p.endswith("/events/current/submissions") for p in posts)
+
+
+def test_agency_owned_mode_is_rejected(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    code = main(
+        ["evidence", "--owned", "--lane", "agency",
+         "--out-dir", str(tmp_path / "ev"), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_transport([]),
+    )
+    assert code == 2
+
+
+def _agency_empty_transport(calls: list, *, fail: str | None = None) -> Any:
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "r",
+                    "ruleset_version": "v",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "c",
+                },
+            )
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": "available"} for i in ids]})
+        if "/events/current/items/" in url and "/lookup" not in url:
+            item_id = url.rsplit("/", 1)[-1]
+            if fail == "network":
+                raise OSError("dns fail")
+            if fail == "api":
+                return _resp(403, {"code": "FORBIDDEN", "message": "m", "request_id": "r", "retryable": False})
+            body = _evidence_item_body(item_id)
+            body["facts"] = []
+            body["snapshot"]["facts_total"] = 0
+            return _resp(200, body)
+        raise AssertionError(f"unexpected url {url}")
+
+    return transport
+
+
+def test_agency_item_without_lines_writes_no_draft(tmp_path: Path) -> None:
+    rows = [_base_row(item_id="88888888", listing_id="888888888_0000000001", dlv_key=8,
+                      dlv_lines=1, dlv_qty=10, dlv_amount=950000, price=100000)]
+    data_dir = _write_dataset(tmp_path, rows)
+    out_dir = tmp_path / "ev"
+    code = main(
+        ["evidence", "--lane", "agency", "--items", "88888888",
+         "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_empty_transport([]),
+    )
+    assert code == 0
+    assert (out_dir / "agency-bundles.jsonl").exists()
+    assert not (out_dir / "drafts" / "agency" / "88888888.json").exists()
+
+
+def test_agency_network_failure_stops_the_lane(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    out_dir = tmp_path / "ev"
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_empty_transport([], fail="network"),
+    )
+    assert code == 3
+    assert (out_dir / "agency-bundles.jsonl").exists()
+
+
+def test_agency_item_api_error_is_skipped(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _agency_rows())
+    out_dir = tmp_path / "ev"
+    code = main(
+        ["evidence", "--lane", "agency", "--items", _AGENCY_ITEM,
+         "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_agency_empty_transport([], fail="api"),
+    )
+    assert code == 0
+    assert not (out_dir / "drafts" / "agency" / f"{_AGENCY_ITEM}.json").exists()
+
+
+def test_live_row_prices_reads_delivery_rows() -> None:
+    from types import SimpleNamespace
+
+    from src.savetax.cli import _live_row_prices
+    from src.savetax.errors import ConfigError, NetworkError, NetworkStage
+
+    class _Fetcher:
+        def __init__(self, page: Any = None, error: Any = None) -> None:
+            self._page = page
+            self._error = error
+
+        def get(self, url: str) -> Any:
+            if self._error is not None:
+                raise self._error
+            return self._page
+
+    assert _live_row_prices(_Fetcher(SimpleNamespace(status=403, text="x")), "https://savetax.now/listing/1") == frozenset()  # type: ignore[arg-type]
+    assert _live_row_prices(_Fetcher(SimpleNamespace(status=200, text="")), "https://savetax.now/listing/1") == frozenset()  # type: ignore[arg-type]
+    assert _live_row_prices(_Fetcher(SimpleNamespace(status=200, text="<html>no rows</html>")), "https://savetax.now/listing/1") == frozenset()  # type: ignore[arg-type]
+    assert _live_row_prices(_Fetcher(error=ConfigError("[SYS] denied")), "https://savetax.now/listing/1") == frozenset()  # type: ignore[arg-type]
+    with pytest.raises(NetworkError):
+        _live_row_prices(_Fetcher(error=NetworkError(NetworkStage.DNS_RESOLUTION, "h", "d")), "https://savetax.now/listing/1")  # type: ignore[arg-type]
+    page = SimpleNamespace(status=200, text=_agency_page().decode())
+    assert _live_row_prices(_Fetcher(page), "https://savetax.now/listing/1") == frozenset({100000, 60000, 70000})  # type: ignore[arg-type]

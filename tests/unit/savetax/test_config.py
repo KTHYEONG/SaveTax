@@ -363,3 +363,53 @@ def test_delivery_paging_bool_is_refused() -> None:
         SaveTaxConfig(delivery_page_size=True)  # type: ignore[arg-type]
     with pytest.raises(ConfigError):
         SaveTaxConfig(delivery_rows_max=False)  # type: ignore[arg-type]
+
+
+def test_agency_defaults_are_valid() -> None:
+    cfg = EvidenceConfig()
+    assert cfg.agency_markup_threshold == Decimal("1.20")
+    assert cfg.agency_window_days == 180
+    assert cfg.agency_near_days == 3
+    assert cfg.agency_price_floor_ratio == Decimal("0.30")
+    assert cfg.agency_mass_price_agencies == 5
+    assert cfg.agency_min_supporters == 2
+    assert cfg.agency_min_lines == 6
+    assert cfg.agency_min_order_amount_krw == 30_000_000
+    assert cfg.agency_island_tokens == ("제주", "서귀포", "울릉", "신안", "옹진", "완도", "진도")
+    assert cfg.agency_excluded_categories == ("폐쇄형배전반", "분전반", "전동기제어반")
+    assert cfg.agency_review_name_pattern == r"\d~\d"
+
+
+@pytest.mark.parametrize("ratio", [Decimal("0"), Decimal("1")])
+def test_agency_floor_ratio_outside_open_interval_is_refused(ratio: Decimal) -> None:
+    with pytest.raises(ConfigError):
+        _evidence(agency_price_floor_ratio=ratio)
+
+
+def test_agency_near_window_larger_than_window_is_refused() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(agency_near_days=200)
+
+
+def test_agency_invalid_review_pattern_is_refused() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(agency_review_name_pattern="(")
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"agency_markup_threshold": Decimal("1")},
+        {"agency_markup_threshold": Decimal("0.9")},
+        {"agency_window_days": 0},
+        {"agency_window_days": True},
+        {"agency_near_days": -1},
+        {"agency_mass_price_agencies": 1},
+        {"agency_min_supporters": 0},
+        {"agency_min_lines": 1},
+        {"agency_min_order_amount_krw": -1},
+    ],
+)
+def test_agency_invalid_configuration_fails_closed(kw: object) -> None:
+    with pytest.raises(ConfigError):
+        _evidence(**kw)  # type: ignore[arg-type]

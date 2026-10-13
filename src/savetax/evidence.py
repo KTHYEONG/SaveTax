@@ -41,6 +41,7 @@ class Lane(enum.StrEnum):
 
     CROSS_CONTRACT = "cross_contract"
     RETAIL = "retail"
+    AGENCY = "agency"
 
 
 @dataclass(frozen=True)

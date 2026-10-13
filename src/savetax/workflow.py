@@ -128,6 +128,7 @@ def preflight(
     lookup_state: ItemState,
     preview: PreviewResult,
     page_prices: Mapping[str, int | None],
+    row_prices: Mapping[str, frozenset[int]] | None = None,
     reserve: int,
     now: datetime,
     approved: bool = True,
@@ -147,14 +148,25 @@ def preflight(
         reasons.append("preview_not_submittable")
     if preview.total_amount_krw != bundle.expected_total_krw:
         reasons.append("amount_changed")
-    for line in bundle.lines:
-        for evidence in line.price_evidence:
-            if page_prices.get(evidence.source_url) != evidence.observed_price_krw:
-                reasons.append("evidence_changed")
-                break
-        else:
-            continue
-        break
+    if bundle.lane is Lane.AGENCY:
+        seen = row_prices if row_prices is not None else {}
+        for line in bundle.lines:
+            for evidence in line.price_evidence:
+                if evidence.observed_price_krw not in seen.get(evidence.source_url, frozenset()):
+                    reasons.append("evidence_changed")
+                    break
+            else:
+                continue
+            break
+    else:
+        for line in bundle.lines:
+            for evidence in line.price_evidence:
+                if page_prices.get(evidence.source_url) != evidence.observed_price_krw:
+                    reasons.append("evidence_changed")
+                    break
+            else:
+                continue
+            break
     if (status.remaining_claims_total is not None and status.remaining_claims_total <= reserve) or (
         status.remaining_claims_per_day is not None and status.remaining_claims_per_day <= reserve
     ):
@@ -215,6 +227,15 @@ def _observed_prices(bundle: EvidenceBundle) -> dict[str, int]:
     return {evidence.source_url: evidence.observed_price_krw for line in bundle.lines for evidence in line.price_evidence}
 
 
+def _observed_row_prices(bundle: EvidenceBundle) -> dict[str, frozenset[int]]:
+    """Return every cited unit price per URL for agency-lane freshness checks."""
+    grouped: dict[str, set[int]] = {}
+    for line in bundle.lines:
+        for evidence in line.price_evidence:
+            grouped.setdefault(evidence.source_url, set()).add(evidence.observed_price_krw)
+    return {url: frozenset(prices) for url, prices in grouped.items()}
+
+
 def _compute_rows(
     drafts: Sequence[tuple[str, Mapping[str, object], EvidenceBundle]],
     *,
@@ -233,7 +254,9 @@ def _compute_rows(
         preview = submission_client.preview(body)
         plan = preflight(
             body, bundle, event=event, status=status, lookup_state=state, preview=preview,
-            page_prices=_observed_prices(bundle), reserve=0, now=now, approved=True,
+            page_prices=_observed_prices(bundle),
+            row_prices=_observed_row_prices(bundle) if bundle.lane is Lane.AGENCY else None,
+            reserve=0, now=now, approved=True,
         )
         gated = tuple(reason for reason in plan.reasons if reason != "limit_reserve" and reason != "evidence_changed")
         if gated:
@@ -452,6 +475,7 @@ def run_submit(
     submission_client: SubmissionClient,
     ledger: Ledger,
     fetch_price: Callable[[str], int | None],
+    fetch_row_prices: Callable[[str], frozenset[int]] | None = None,
     now: datetime,
     ttl: timedelta,
     reserve: int = 5,
@@ -525,19 +549,38 @@ def run_submit(
             exit_code = 2
             continue
         preview = submission_client.preview(body)
-        prices = {url: fetch_price(url) for url in _source_urls(bundle)}
-        moment = clock() if clock is not None else now
-        now = moment
-        current_event = competition.get_event() if clock is not None else event
-        if clock is not None:
-            fresh = competition.get_me()
-            remaining_total = [n for n in (status.remaining_claims_total, fresh.remaining_claims_total) if n is not None]
-            remaining_daily = [n for n in (status.remaining_claims_per_day, fresh.remaining_claims_per_day) if n is not None]
-            status = replace(fresh, remaining_claims_total=min(remaining_total) if remaining_total else None,
-                             remaining_claims_per_day=min(remaining_daily) if remaining_daily else None)
-        plan = preflight(body, bundle, event=current_event, status=status, lookup_state=state,
-                         preview=preview, page_prices=prices, reserve=reserve, now=moment,
-                         approved=verify_approval(ledger, item_id, digest, moment, ttl))
+        if bundle.lane is Lane.AGENCY:
+            urls = _source_urls(bundle)
+            row_sets: dict[str, frozenset[int]] = {
+                url: (fetch_row_prices(url) if fetch_row_prices is not None else frozenset[int]())
+                for url in urls
+            }
+            moment = clock() if clock is not None else now
+            now = moment
+            current_event = competition.get_event() if clock is not None else event
+            if clock is not None:
+                fresh = competition.get_me()
+                remaining_total = [n for n in (status.remaining_claims_total, fresh.remaining_claims_total) if n is not None]
+                remaining_daily = [n for n in (status.remaining_claims_per_day, fresh.remaining_claims_per_day) if n is not None]
+                status = replace(fresh, remaining_claims_total=min(remaining_total) if remaining_total else None,
+                                 remaining_claims_per_day=min(remaining_daily) if remaining_daily else None)
+            plan = preflight(body, bundle, event=current_event, status=status, lookup_state=state,
+                             preview=preview, page_prices={}, row_prices=row_sets, reserve=reserve, now=moment,
+                             approved=verify_approval(ledger, item_id, digest, moment, ttl))
+        else:
+            prices = {url: fetch_price(url) for url in _source_urls(bundle)}
+            moment = clock() if clock is not None else now
+            now = moment
+            current_event = competition.get_event() if clock is not None else event
+            if clock is not None:
+                fresh = competition.get_me()
+                remaining_total = [n for n in (status.remaining_claims_total, fresh.remaining_claims_total) if n is not None]
+                remaining_daily = [n for n in (status.remaining_claims_per_day, fresh.remaining_claims_per_day) if n is not None]
+                status = replace(fresh, remaining_claims_total=min(remaining_total) if remaining_total else None,
+                                 remaining_claims_per_day=min(remaining_daily) if remaining_daily else None)
+            plan = preflight(body, bundle, event=current_event, status=status, lookup_state=state,
+                             preview=preview, page_prices=prices, reserve=reserve, now=moment,
+                             approved=verify_approval(ledger, item_id, digest, moment, ttl))
         if not plan.allowed:
             ledger.append(
                 LedgerEntry(at=now, kind="refused", item_id=item_id, submission_id=None,
@@ -638,6 +681,7 @@ def run_revise(
     out: TextIO | None = None,
     bundle: EvidenceBundle | None = None,
     fetch_price: Callable[[str], int | None] | None = None,
+    fetch_row_prices: Callable[[str], frozenset[int]] | None = None,
     event: EventInfo | None = None,
     clock: Callable[[], datetime] | None = None,
     event_provider: Callable[[], EventInfo] | None = None,
@@ -673,12 +717,20 @@ def run_revise(
     preview = submission_client.preview(body)
     if not preview.ok or preview.next_action != "revise_existing":
         raise ConfigError("[SYS] revision preview is not admissible")
-    if bundle is None or fetch_price is None or event is None:
+    if bundle is None or event is None:
         raise ConfigError("[SYS] revision requires fresh evidence and event")
     bundle = bind_bundle(body, bundle)
-    if (preview.total_amount_krw != bundle.expected_total_krw
-            or any(fetch_price(e.source_url) != e.observed_price_krw
-                   for line in bundle.lines for e in line.price_evidence)):
+    if preview.total_amount_krw != bundle.expected_total_krw:
+        raise ConfigError("[SYS] revision evidence or amount changed")
+    if bundle.lane is Lane.AGENCY:
+        if fetch_row_prices is None:
+            raise ConfigError("[SYS] revision requires fresh row evidence")
+        seen_rows = {url: fetch_row_prices(url) for url in _source_urls(bundle)}
+        if any(e.observed_price_krw not in seen_rows.get(e.source_url, frozenset())
+               for line in bundle.lines for e in line.price_evidence):
+            raise ConfigError("[SYS] revision evidence or amount changed")
+    elif fetch_price is None or any(fetch_price(e.source_url) != e.observed_price_krw
+             for line in bundle.lines for e in line.price_evidence):
         raise ConfigError("[SYS] revision evidence or amount changed")
     now = clock() if clock is not None else now
     event = event_provider() if event_provider is not None else event
@@ -776,6 +828,7 @@ def run_action_batch(
     execute: bool, pause_seconds: float, stop_after_consecutive_suspect: int,
     fetch_price: Callable[[str], int | None], event_provider: Callable[[], EventInfo],
     clock: Callable[[], datetime], sleep: Callable[[float], None] = time.sleep,
+    fetch_row_prices: Callable[[str], frozenset[int]] | None = None,
     out: TextIO | None = None,
 ) -> tuple[int, int]:
     """Run approved revisions or withdrawals in order; returns (done, skipped)."""
@@ -799,7 +852,8 @@ def run_action_batch(
                 receipt = run_revise(
                     submission_id, item_id, body, submission_client=submission_client,
                     ledger=ledger, now=clock(), ttl=ttl, execute=True, bundle=bundle,
-                    fetch_price=fetch_price, event=event_provider(), clock=clock,
+                    fetch_price=fetch_price, fetch_row_prices=fetch_row_prices,
+                    event=event_provider(), clock=clock,
                     event_provider=event_provider, out=stream,
                 )
             else:

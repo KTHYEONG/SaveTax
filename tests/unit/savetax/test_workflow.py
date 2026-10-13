@@ -1152,3 +1152,147 @@ def test_batch_retryable_error_skipped_and_fallback_status(tmp_path) -> None:
                                      stop_after_consecutive_suspect=2, fetch_price=lambda _: 1000,
                                      event_provider=_event, clock=_now, sleep=lambda _: None, out=io.StringIO())
     assert (done, skipped) == (0, 1)
+
+
+def _agency_bundle(item: str = "11111111", url: str = "https://savetax.now/listing/1") -> EvidenceBundle:
+    def _line(fact: str, price: int, expected: int) -> LineProposal:
+        return LineProposal(
+            fact_id=fact, benchmark_unit_price_krw=Decimal(str(price)),
+            comparison_basis_id="basis:대:vat", unit="대", tax_basis="vat_included",
+            fact_unit_price_krw=Decimal("100"), quantity=Decimal("10"),
+            comparable_amount_krw=Decimal("1000"), request_date=date(2026, 10, 1),
+            expected_krw=expected,
+            price_evidence=(PriceEvidence(source_url=url, quote="납품요구 기록: R1 / 확인",
+                                           observed_price_krw=price, observed_at=date(2026, 10, 1),
+                                           vat_included=True, shipping_included=True),),
+        )
+
+    lines = (_line("F1", 70, 300), _line("F2", 90, 100))
+    return EvidenceBundle(item_id=item, lane=Lane.AGENCY, title=f"title-{item}", claim="claim",
+                          comparison_scope="scope", reproduction_notes="notes", lines=lines, rejected=(),
+                          caveats=(), review_required=False, generated_at=_now(), unit_notes=())
+
+
+def _agency_body(item: str = "11111111") -> dict[str, object]:
+    from src.savetax.evidence import _line_to_draft
+
+    bundle = _agency_bundle(item)
+    return {"dataset_release_id": "release-1", "ruleset_version": "rules-v1",
+            "canonical_product_id": item, "title": f"title-{item}",
+            "lines": [_line_to_draft(line) for line in bundle.lines]}
+
+
+def test_agency_evidence_passes_when_the_row_price_is_still_on_the_page() -> None:
+    bundle = _agency_bundle()
+    plan = preflight(_agency_body(), bundle, event=_event(), status=_status(),
+                     lookup_state=ItemState.AVAILABLE, preview=_preview(total=400),
+                     page_prices={}, row_prices={"https://savetax.now/listing/1": frozenset({70, 90, 120})},
+                     reserve=5, now=_now(), approved=True)
+    assert plan.allowed
+    assert plan.reasons == ()
+
+
+def test_agency_evidence_fails_when_a_row_price_disappeared() -> None:
+    bundle = _agency_bundle()
+    plan = preflight(_agency_body(), bundle, event=_event(), status=_status(),
+                     lookup_state=ItemState.AVAILABLE, preview=_preview(total=400),
+                     page_prices={}, row_prices={"https://savetax.now/listing/1": frozenset({70})},
+                     reserve=5, now=_now(), approved=True)
+    assert plan.reasons == ("evidence_changed",)
+
+
+def test_agency_submit_without_a_row_fetcher_is_refused(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(total=400))
+    bundle = _agency_bundle()
+    _approve(ledger, "11111111", body_hash(_agency_body()))
+    price_calls: list[str] = []
+    receipts, _ = run_submit([("11111111", _agency_body(), bundle)], event=_event(), status=_status(),  # type: ignore[arg-type]
+                             competition=_Competition(), submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                             fetch_price=lambda url: price_calls.append(url) or 70,  # type: ignore[arg-type]
+                             now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO())
+    assert receipts == []
+    assert subs.submits == []
+    assert price_calls == []
+    assert ledger.entries()[-1].kind == "refused"
+
+
+def test_cross_bundles_ignore_row_prices() -> None:
+    bundle = _bundle()
+    plan = preflight(_body(), bundle, event=_event(), status=_status(),
+                     lookup_state=ItemState.AVAILABLE, preview=_preview(),
+                     page_prices={"https://example.com/a": 5},
+                     row_prices={"https://example.com/a": frozenset({1000})},
+                     reserve=5, now=_now(), approved=True)
+    assert plan.reasons == ("evidence_changed",)
+
+
+def test_agency_review_uses_own_row_prices(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(total=400))
+    bundle = _agency_bundle()
+    review = run_review([("11111111", _agency_body(), bundle)], event=_event(), status=_status(),  # type: ignore[arg-type]
+                        competition=_Competition(), submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                        now=_now(), out=io.StringIO())
+    assert [row.item_id for row in review.rows] == ["11111111"]
+
+
+def test_agency_revise_checks_row_prices(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(total=400, action="revise_existing"))
+    bundle = _agency_bundle()
+    body = _agency_body()
+    digest = action_hash("revise", _clean_detail(), body)
+    ledger.append(LedgerEntry(at=_now(), kind="approved", item_id="11111111", submission_id=None,
+                              body_sha256=digest, idempotency_key=None,
+                              data={"kind": "revise", "note": "yes", "total": 1}))
+    subs.details = [_clean_detail()]
+    with pytest.raises(ConfigError):
+        run_revise("SID1", "11111111", body, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                   now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                   bundle=bundle, event=_event(), fetch_price=lambda _: 70)
+    receipt = run_revise("SID1", "11111111", body, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                         now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                         bundle=bundle, event=_event(),
+                         fetch_row_prices=lambda _: frozenset({70, 90}))
+    assert receipt is not None
+
+
+def test_agency_revise_amount_drift_is_refused(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(total=1, action="revise_existing"))
+    bundle = _agency_bundle()
+    body = _agency_body()
+    digest = action_hash("revise", _clean_detail(), body)
+    ledger.append(LedgerEntry(at=_now(), kind="approved", item_id="11111111", submission_id=None,
+                              body_sha256=digest, idempotency_key=None,
+                              data={"kind": "revise", "note": "yes", "total": 1}))
+    subs.details = [_clean_detail()]
+    with pytest.raises(ConfigError):
+        run_revise("SID1", "11111111", body, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                   now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                   bundle=bundle, event=_event(), fetch_price=lambda _: 70,
+                   fetch_row_prices=lambda _: frozenset({70, 90}))
+
+
+def test_agency_revise_missing_row_price_is_refused(tmp_path: Path) -> None:
+    from src.savetax.workflow import action_hash
+
+    ledger = _ledger(tmp_path)
+    subs = _Submissions(preview=_preview(total=400, action="revise_existing"))
+    bundle = _agency_bundle()
+    body = _agency_body()
+    digest = action_hash("revise", _clean_detail(), body)
+    ledger.append(LedgerEntry(at=_now(), kind="approved", item_id="11111111", submission_id=None,
+                              body_sha256=digest, idempotency_key=None,
+                              data={"kind": "revise", "note": "yes", "total": 1}))
+    subs.details = [_clean_detail()]
+    with pytest.raises(ConfigError):
+        run_revise("SID1", "11111111", body, submission_client=subs, ledger=ledger,  # type: ignore[arg-type]
+                   now=_now(), ttl=timedelta(hours=6), execute=True, out=io.StringIO(),
+                   bundle=bundle, event=_event(), fetch_price=lambda _: 70,
+                   fetch_row_prices=lambda _: frozenset({70}))

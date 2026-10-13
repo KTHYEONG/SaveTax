@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -449,6 +450,17 @@ class EvidenceConfig:
     unit_conflict_policy: UnitConflictPolicy = UnitConflictPolicy.ANNOTATE
     variant_policy: VariantPolicy = VariantPolicy.SERIES
     series_blocks: tuple[SeriesBlock, ...] = DEFAULT_SERIES_BLOCKS
+    agency_markup_threshold: Decimal = Decimal("1.20")
+    agency_window_days: int = 180
+    agency_near_days: int = 3
+    agency_price_floor_ratio: Decimal = Decimal("0.30")
+    agency_mass_price_agencies: int = 5
+    agency_min_supporters: int = 2
+    agency_min_lines: int = 6
+    agency_min_order_amount_krw: int = 30_000_000
+    agency_island_tokens: tuple[str, ...] = ("제주", "서귀포", "울릉", "신안", "옹진", "완도", "진도")
+    agency_excluded_categories: tuple[str, ...] = ("폐쇄형배전반", "분전반", "전동기제어반")
+    agency_review_name_pattern: str = r"\d~\d"
 
     def __post_init__(self) -> None:
         try:
@@ -502,6 +514,33 @@ class EvidenceConfig:
             raise ConfigError("[SYS] invalid max_draft_bytes: must be >= 1")
         if not math.isfinite(self.public_request_interval_seconds) or self.public_request_interval_seconds < 0:
             raise ConfigError("[SYS] invalid public_request_interval_seconds: must be finite and >= 0")
+        if not self.agency_markup_threshold.is_finite() or self.agency_markup_threshold <= 1:
+            raise ConfigError("[SYS] invalid agency_markup_threshold: must be finite and > 1")
+        for name in ("agency_window_days", "agency_near_days", "agency_mass_price_agencies",
+                     "agency_min_supporters", "agency_min_lines", "agency_min_order_amount_krw"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(f"[SYS] invalid {name}: expected integer")
+        if self.agency_window_days < 1:
+            raise ConfigError("[SYS] invalid agency_window_days: must be >= 1")
+        if not 0 <= self.agency_near_days <= self.agency_window_days:
+            raise ConfigError("[SYS] invalid agency_near_days: must be 0..agency_window_days")
+        if (not self.agency_price_floor_ratio.is_finite() or not 0 < self.agency_price_floor_ratio < 1):
+            raise ConfigError("[SYS] invalid agency_price_floor_ratio: must be finite and in (0, 1)")
+        if self.agency_mass_price_agencies < 2:
+            raise ConfigError("[SYS] invalid agency_mass_price_agencies: must be >= 2")
+        if self.agency_min_supporters < 1:
+            raise ConfigError("[SYS] invalid agency_min_supporters: must be >= 1")
+        if self.agency_min_lines < 2:
+            raise ConfigError("[SYS] invalid agency_min_lines: must be >= 2")
+        if self.agency_min_order_amount_krw < 0:
+            raise ConfigError("[SYS] invalid agency_min_order_amount_krw: must be >= 0")
+        object.__setattr__(self, "agency_island_tokens", tuple(self.agency_island_tokens))
+        object.__setattr__(self, "agency_excluded_categories", tuple(self.agency_excluded_categories))
+        try:
+            re.compile(self.agency_review_name_pattern)
+        except re.error:
+            raise ConfigError("[SYS] invalid agency_review_name_pattern: must compile") from None
         for shop in self.shops:
             if shop.platform not in ("cafe24", "godomall"):
                 raise ConfigError(f"[SYS] invalid shop platform: {shop.platform!r} must be cafe24 or godomall")
