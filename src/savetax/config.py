@@ -461,6 +461,8 @@ class EvidenceConfig:
     agency_island_tokens: tuple[str, ...] = ("제주", "서귀포", "울릉", "신안", "옹진", "완도", "진도")
     agency_excluded_categories: tuple[str, ...] = ("폐쇄형배전반", "분전반", "전동기제어반")
     agency_review_name_pattern: str = r"\d~\d"
+    agency_request_scope: bool = True
+    agency_request_listings_max: int = 200
 
     def __post_init__(self) -> None:
         try:
@@ -535,6 +537,14 @@ class EvidenceConfig:
             raise ConfigError("[SYS] invalid agency_min_lines: must be >= 2")
         if self.agency_min_order_amount_krw < 0:
             raise ConfigError("[SYS] invalid agency_min_order_amount_krw: must be >= 0")
+        if not isinstance(self.agency_request_scope, bool):
+            raise ConfigError("[SYS] invalid agency_request_scope: expected bool")
+        if isinstance(self.agency_request_listings_max, bool) or not isinstance(
+            self.agency_request_listings_max, int
+        ):
+            raise ConfigError("[SYS] invalid agency_request_listings_max: must be >= 1")
+        if self.agency_request_listings_max < 1:
+            raise ConfigError("[SYS] invalid agency_request_listings_max: must be >= 1")
         object.__setattr__(self, "agency_island_tokens", tuple(self.agency_island_tokens))
         object.__setattr__(self, "agency_excluded_categories", tuple(self.agency_excluded_categories))
         try:

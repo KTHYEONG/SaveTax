@@ -413,3 +413,18 @@ def test_agency_invalid_review_pattern_is_refused() -> None:
 def test_agency_invalid_configuration_fails_closed(kw: object) -> None:
     with pytest.raises(ConfigError):
         _evidence(**kw)  # type: ignore[arg-type]
+
+
+def test_agency_listings_cap_must_be_positive() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(agency_request_listings_max=0)
+
+
+def test_agency_listings_cap_rejects_bool() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(agency_request_listings_max=True)  # type: ignore[arg-type]
+
+
+def test_agency_scope_flag_must_be_bool() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(agency_request_scope=1)  # type: ignore[arg-type]

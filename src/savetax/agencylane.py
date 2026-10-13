@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, localcontext
@@ -28,7 +28,9 @@ __all__ = [
     "AgencyCandidate",
     "agency_benchmark",
     "build_agency_bundle",
+    "contract_order_listings",
     "find_agency_candidates",
+    "request_values",
 ]
 
 _CLAIM_TEMPLATE = (
@@ -80,6 +82,8 @@ class AgencyBenchmark:
     before: DeliveryRow
     after: DeliveryRow
     supporter_agencies: int
+    target_request_krw: Decimal | None = None
+    anchor_request_krw: Decimal | None = None
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -199,12 +203,66 @@ def _row_key(row: DeliveryRow) -> tuple[str, str]:
     return (row.request_no, row.line_no)
 
 
-def agency_benchmark(target: DeliveryRow, rows: Sequence[DeliveryRow], evidence: EvidenceConfig) -> AgencyBenchmark | None:
+def contract_order_listings(dataset: Dataset, contract_no: str) -> tuple[str, ...]:
+    """Return one listing id per ordered (contract, item) key of a contract, sorted ascending."""
+    rows = dataset.connection.execute(
+        "SELECT MIN(listing_id) FROM listings "  # noqa: S608
+        "WHERE contract_no = ? AND dlv_key IS NOT NULL "  # noqa: S608
+        "GROUP BY dlv_key",  # noqa: S608
+        [contract_no],
+    ).fetchall()
+    return tuple(sorted(str(row[0]) for row in rows))
+
+
+def request_values(row_sets: Iterable[Sequence[DeliveryRow]]) -> dict[str, Decimal]:
+    """Return each request's size in KRW at contract unit prices, summed over every item of the contract."""
+    seen: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
+    totals: dict[str, Decimal] = {}
+    unusable: set[str] = set()
+    for row_set in row_sets:
+        for row in row_set:
+            key = (row.request_no, row.line_no)
+            values = (row.quantity, row.unit_price_krw, row.contract_unit_price_krw, row.amount_krw)
+            if not all(value.is_finite() for value in values):
+                unusable.add(row.request_no)
+                continue
+            if row.quantity <= 0 or row.contract_unit_price_krw <= 0:
+                unusable.add(row.request_no)
+                continue
+            size_inputs = (row.quantity, row.contract_unit_price_krw)
+            if key in seen:
+                if seen[key] != size_inputs:
+                    unusable.add(row.request_no)
+                continue
+            seen[key] = size_inputs
+            previous = totals.get(row.request_no, Decimal(0))
+            with localcontext() as context:
+                context.prec = _arithmetic_precision(previous, *size_inputs)
+                totals[row.request_no] = previous + row.contract_unit_price_krw * row.quantity
+    for request_no in unusable:
+        totals.pop(request_no, None)
+    return totals
+
+
+def agency_benchmark(
+    target: DeliveryRow, rows: Sequence[DeliveryRow], evidence: EvidenceConfig,
+    request_value: Mapping[str, Decimal] | None = None,
+) -> AgencyBenchmark | None:
     """Return the benchmark other agencies paid under the same contract unit price, or None."""
     if not _is_valid_row(target):
         return None
     if any(token in target.agency_name for token in evidence.agency_island_tokens if token):
         return None
+    scoped = evidence.agency_request_scope
+    target_request: Decimal | None = None
+    scope_table: Mapping[str, Decimal] = {}
+    if scoped:
+        if request_value is None:
+            return None
+        target_request = request_value.get(target.request_no)
+        if target_request is None:
+            return None
+        scope_table = request_value
     with localcontext() as context:
         context.prec = _arithmetic_precision(evidence.agency_price_floor_ratio, target.contract_unit_price_krw)
         floor = evidence.agency_price_floor_ratio * target.contract_unit_price_krw
@@ -221,6 +279,11 @@ def agency_benchmark(target: DeliveryRow, rows: Sequence[DeliveryRow], evidence:
         and row.quantity <= target.quantity
         and row.amount_krw <= target.amount_krw
         and abs((row.request_date - target.request_date).days) <= evidence.agency_window_days
+        and (not scoped or (
+            (peer_value := scope_table.get(row.request_no)) is not None
+            and target_request is not None
+            and peer_value <= target_request
+        ))
     ]
     before = [row for row in peers if row.request_date <= target.request_date]
     after = [row for row in peers if row.request_date >= target.request_date]
@@ -265,6 +328,15 @@ def agency_benchmark(target: DeliveryRow, rows: Sequence[DeliveryRow], evidence:
     before_pick = min(before_here, key=lambda r: ((target.request_date - r.request_date).days, r.request_no, r.line_no))
     after_pick = min(after_here, key=lambda r: ((r.request_date - target.request_date).days, r.request_no, r.line_no))
     agencies_support = {row.agency_name for row in supporters}
+    if scoped:
+        assert request_value is not None
+        assert target_request is not None
+        return AgencyBenchmark(
+            price_krw=price, anchor=anchor, before=before_pick, after=after_pick,
+            supporter_agencies=len(agencies_support),
+            target_request_krw=target_request,
+            anchor_request_krw=request_value.get(anchor.request_no),
+        )
     return AgencyBenchmark(
         price_krw=price, anchor=anchor, before=before_pick, after=after_pick,
         supporter_agencies=len(agencies_support),
@@ -325,25 +397,75 @@ def build_agency_bundle(
         key_listing.setdefault(contract_no, listing_id)
     rows_by_contract: dict[str, tuple[DeliveryRow, ...] | None] = {}
     fetch_failed: set[str] = set()
-    for contract_no, listing_id in key_listing.items():
-        if contract_no not in by_contract:
-            continue
-        try:
-            fetched = raw.list_deliveries(listing_id)
-        except (ApiError, DataIntegrityError):
-            fetched = None
-            fetch_failed.add(contract_no)
-        if fetched is None:
-            rows_by_contract[contract_no] = None
-            fetch_failed.add(contract_no)
-        else:
-            rows_by_contract[contract_no] = fetched
-    if fetch_failed:
-        rejected.extend(
-            RejectedFact(fact.fact_id, "rows_unavailable")
-            for contract_no in fetch_failed
-            for fact in by_contract.get(contract_no, [])
-        )
+    request_value_by_contract: dict[str, dict[str, Decimal]] = {}
+    if evidence.agency_request_scope:
+        fetched_cache: dict[str, tuple[DeliveryRow, ...] | None] = {}
+        scope_failed: set[str] = set()
+        for contract_no in by_contract:
+            ids = contract_order_listings(dataset, contract_no)
+            if not ids or len(ids) > evidence.agency_request_listings_max:
+                scope_failed.add(contract_no)
+                continue
+            row_sets: list[tuple[DeliveryRow, ...]] = []
+            failed = False
+            for listing_id in ids:
+                if listing_id not in fetched_cache:
+                    try:
+                        fetched = raw.list_deliveries(listing_id)
+                    except (ApiError, DataIntegrityError):
+                        fetched = None
+                    fetched_cache[listing_id] = fetched
+                else:
+                    fetched = fetched_cache[listing_id]
+                if fetched is None:
+                    failed = True
+                else:
+                    row_sets.append(fetched)
+            if failed:
+                scope_failed.add(contract_no)
+                continue
+            key_id = key_listing.get(contract_no)
+            if key_id is None:
+                continue
+            key_rows = fetched_cache.get(key_id)
+            if key_id not in fetched_cache:
+                try:
+                    key_rows = raw.list_deliveries(key_id)
+                except (ApiError, DataIntegrityError):
+                    key_rows = None
+                fetched_cache[key_id] = key_rows
+                if key_rows is None:
+                    scope_failed.add(contract_no)
+                    continue
+                row_sets.append(key_rows)
+            rows_by_contract[contract_no] = key_rows
+            request_value_by_contract[contract_no] = request_values(row_sets)
+        if scope_failed:
+            rejected.extend(
+                RejectedFact(fact.fact_id, "request_scope_unavailable")
+                for contract_no in scope_failed
+                for fact in by_contract.get(contract_no, [])
+            )
+    else:
+        for contract_no, listing_id in key_listing.items():
+            if contract_no not in by_contract:
+                continue
+            try:
+                fetched = raw.list_deliveries(listing_id)
+            except (ApiError, DataIntegrityError):
+                fetched = None
+                fetch_failed.add(contract_no)
+            if fetched is None:
+                rows_by_contract[contract_no] = None
+                fetch_failed.add(contract_no)
+            else:
+                rows_by_contract[contract_no] = fetched
+        if fetch_failed:
+            rejected.extend(
+                RejectedFact(fact.fact_id, "rows_unavailable")
+                for contract_no in fetch_failed
+                for fact in by_contract.get(contract_no, [])
+            )
     page_cache: dict[str, tuple[str | None, list[tuple[str, DeliveryPage | str]]]] = {}
     lines: list[LineProposal] = []
     cited_contracts: dict[str, int] = {}
@@ -377,7 +499,7 @@ def build_agency_bundle(
         if not reconcile_units(fact.unit, row.unit, None).comparable:
             rejected.append(RejectedFact(fact.fact_id, "unit_mismatch"))
             continue
-        benchmark = agency_benchmark(row, rows, evidence)
+        benchmark = agency_benchmark(row, rows, evidence, request_value_by_contract.get(fact.contract_no))
         if benchmark is None:
             rejected.append(RejectedFact(fact.fact_id, "no_agency_benchmark"))
             continue
@@ -416,13 +538,33 @@ def build_agency_bundle(
     review_required = detail.name is not None and re.search(evidence.agency_review_name_pattern, detail.name) is not None
     window = evidence.agency_window_days
     floor_pct = int(evidence.agency_price_floor_ratio * 100)
-    claim = _CLAIM_TEMPLATE.format(item_id=candidate.item_id, window=window)
-    scope = _SCOPE_TEMPLATE.format(
-        window=window, supporters=evidence.agency_min_supporters, floor=floor_pct,
-        mass=evidence.agency_mass_price_agencies, near=evidence.agency_near_days,
-        threshold=_format_threshold(evidence.agency_markup_threshold),
-    )
-    notes = _NOTES_TEMPLATE.format(version=dataset.version, floor=floor_pct)
+    if evidence.agency_request_scope:
+        claim = _CLAIM_TEMPLATE.format(item_id=candidate.item_id, window=window).replace(
+            "이 납품요구보다 수량과 금액이 같거나 적은 다른 기관의 납품요구가",
+            "이 납품요구보다 수량과 금액이 같거나 적고, 요구서 전체 규모도 같거나 작은 다른 기관의 납품요구가",
+        )
+        scope = _SCOPE_TEMPLATE.format(
+            window=window, supporters=evidence.agency_min_supporters, floor=floor_pct,
+            mass=evidence.agency_mass_price_agencies, near=evidence.agency_near_days,
+            threshold=_format_threshold(evidence.agency_markup_threshold),
+        ).replace(
+            "비교 납품요구의 수량과 금액이 이 납품요구 이하 · ",
+            "비교 납품요구의 수량과 금액이 이 납품요구 이하 · "
+            "비교 납품요구가 속한 요구서 전체 규모(같은 계약의 모든 품목, 계약단가 × 수량 합)가 이 납품요구의 요구서 이하 · ",  # noqa: RUF001
+        )
+        notes = _NOTES_TEMPLATE.format(version=dataset.version, floor=floor_pct).replace(
+            "2단계경쟁·할인행사 같은 주문별 가격 결정 방식과 한 요구서에 함께 담긴 다른 품목은 자료에 없어 조정하지 않았다. ",
+            "2단계경쟁 실시 여부와 할인행사 같은 주문별 가격 결정 방식은 자료에 없어 직접 확인하지 못했다. "
+            "대신 요구서 전체 규모가 더 큰 주문은 비교에서 제외하였다. ",
+        )
+    else:
+        claim = _CLAIM_TEMPLATE.format(item_id=candidate.item_id, window=window)
+        scope = _SCOPE_TEMPLATE.format(
+            window=window, supporters=evidence.agency_min_supporters, floor=floor_pct,
+            mass=evidence.agency_mass_price_agencies, near=evidence.agency_near_days,
+            threshold=_format_threshold(evidence.agency_markup_threshold),
+        )
+        notes = _NOTES_TEMPLATE.format(version=dataset.version, floor=floor_pct)
     caveats = tuple(
         f"계약 {contract_no}: 비교 납품요구 {count}건 인용"
         for contract_no, count in sorted(cited_contracts.items())
@@ -515,6 +657,11 @@ def _price_evidence(
         f"이전: {_seg(benchmark.before)} / 이후: {_seg(benchmark.after)} / "
         f"이 단가 이하 기관 {benchmark.supporter_agencies}곳"
     )
+    if benchmark.target_request_krw is not None and benchmark.anchor_request_krw is not None:
+        note += (
+            f" / 요구서 규모(계약단가 기준): 이 납품요구 {_format_won(benchmark.target_request_krw)}원, "
+            f"비교 {_format_won(benchmark.anchor_request_krw)}원"
+        )
     if len(note) > 500:
         note = note[:500]
     return PriceEvidence(

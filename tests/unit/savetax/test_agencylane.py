@@ -156,7 +156,7 @@ def _peers() -> list[DeliveryRow]:
 def test_cheaper_smaller_orders_on_both_sides_give_a_benchmark() -> None:
     target = _row()
     rows = [target, *_peers()]
-    benchmark = agency_benchmark(target, rows, EvidenceConfig())
+    benchmark = agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.price_krw == Decimal("70")
     assert benchmark.anchor == rows[2]
@@ -174,7 +174,7 @@ def test_benchmark_is_not_the_lowest_price() -> None:
         _row(request_no="R25TA000004", agency_name="D구청", unit_price_krw=Decimal("70"),
              quantity=Decimal("8"), amount_krw=Decimal("560"), request_date=date(2025, 11, 21)),
     ]
-    benchmark = agency_benchmark(target, rows, EvidenceConfig())
+    benchmark = agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.price_krw == Decimal("70")
 
@@ -186,7 +186,7 @@ def test_larger_order_is_not_a_peer() -> None:
         _row(request_no="R25TA000002", agency_name="B구청", unit_price_krw=Decimal("60"),
              quantity=Decimal("20"), amount_krw=Decimal("1200"), request_date=date(2025, 9, 12)),
     ]
-    assert agency_benchmark(target, rows, EvidenceConfig()) is None
+    assert agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_one_sided_evidence_is_rejected() -> None:
@@ -196,7 +196,7 @@ def test_one_sided_evidence_is_rejected() -> None:
         _row(request_no="R25TA000002", agency_name="B구청", unit_price_krw=Decimal("60"),
              quantity=Decimal("5"), amount_krw=Decimal("300"), request_date=date(2025, 9, 12)),
     ]
-    assert agency_benchmark(target, rows, EvidenceConfig()) is None
+    assert agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_single_supporting_agency_is_rejected() -> None:
@@ -208,7 +208,7 @@ def test_single_supporting_agency_is_rejected() -> None:
         _row(request_no="R25TA000003", agency_name="B구청", unit_price_krw=Decimal("70"),
              quantity=Decimal("5"), amount_krw=Decimal("350"), request_date=date(2025, 11, 21)),
     ]
-    assert agency_benchmark(target, rows, EvidenceConfig()) is None
+    assert agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_different_contract_unit_price_is_not_compared() -> None:
@@ -222,7 +222,7 @@ def test_different_contract_unit_price_is_not_compared() -> None:
              quantity=Decimal("8"), amount_krw=Decimal("560"), request_date=date(2025, 11, 21),
              contract_unit_price_krw=Decimal("200")),
     ]
-    assert agency_benchmark(target, rows, EvidenceConfig()) is None
+    assert agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_deep_discount_below_the_floor_is_ignored() -> None:
@@ -233,7 +233,7 @@ def test_deep_discount_below_the_floor_is_ignored() -> None:
         _row(request_no="R25TA000004", agency_name="D구청", unit_price_krw=Decimal("20"),
              quantity=Decimal("5"), amount_krw=Decimal("100"), request_date=date(2025, 9, 15)),
     ]
-    benchmark = agency_benchmark(target, rows, EvidenceConfig())
+    benchmark = agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.price_krw == Decimal("70")
     assert benchmark.supporter_agencies == 2
@@ -241,7 +241,7 @@ def test_deep_discount_below_the_floor_is_ignored() -> None:
 
 def test_markup_below_the_threshold_is_rejected() -> None:
     target = _row(unit_price_krw=Decimal("80"), amount_krw=Decimal("800"))
-    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig()) is None
+    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig(agency_request_scope=False)) is None
 
 
 def _mass_rows(near_day: date) -> tuple[DeliveryRow, list[DeliveryRow]]:
@@ -262,19 +262,19 @@ def _mass_rows(near_day: date) -> tuple[DeliveryRow, list[DeliveryRow]]:
 
 def test_common_discount_price_in_another_period_is_rejected() -> None:
     target, rows = _mass_rows(date(2025, 9, 8))
-    assert agency_benchmark(target, rows, EvidenceConfig()) is None
+    assert agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_common_discount_price_on_nearly_the_same_day_is_accepted() -> None:
     target, rows = _mass_rows(date(2025, 10, 10))
-    benchmark = agency_benchmark(target, rows, EvidenceConfig())
+    benchmark = agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.price_krw == Decimal("70")
 
 
 def test_island_agency_target_is_rejected() -> None:
     target = _row(agency_name="제주특별자치도청")
-    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig()) is None
+    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_row_whose_amount_is_not_price_times_quantity_is_ignored() -> None:
@@ -285,7 +285,7 @@ def test_row_whose_amount_is_not_price_times_quantity_is_ignored() -> None:
         _row(request_no="R25TA000004", agency_name="D구청", unit_price_krw=Decimal("65"),
              quantity=Decimal("5"), amount_krw=Decimal("999"), request_date=date(2025, 9, 15)),
     ]
-    benchmark = agency_benchmark(target, rows, EvidenceConfig())
+    benchmark = agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.supporter_agencies == 2
 
@@ -487,7 +487,7 @@ def test_row_fetch_failure_rejects_the_contract_facts(tmp_path: Path) -> None:
                              f"<table>{_anchor_row_html()}</table></body></html>")}
     with _dataset(tmp_path, [_base_row()]) as dataset:
         bundle = build_agency_bundle(candidate, _detail([_fact(), second]), dataset, raw,  # type: ignore[arg-type]
-                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(agency_request_scope=False), AuditConfig(),  # type: ignore[arg-type]
                                      today=date(2026, 10, 13))
     assert bundle is not None
     assert len(bundle.lines) == 1
@@ -593,7 +593,7 @@ def test_unknown_requested_item_returns_nothing(tmp_path: Path) -> None:
 
 def test_invalid_target_is_rejected() -> None:
     target = _row(quantity=Decimal("0"), amount_krw=Decimal("0"))
-    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig()) is None
+    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig(agency_request_scope=False)) is None
 
 
 def test_blank_agency_peer_is_ignored() -> None:
@@ -604,7 +604,7 @@ def test_blank_agency_peer_is_ignored() -> None:
         _row(request_no="R25TA000004", agency_name="   ", unit_price_krw=Decimal("50"),
              quantity=Decimal("5"), amount_krw=Decimal("250"), request_date=date(2025, 9, 15)),
     ]
-    benchmark = agency_benchmark(target, rows, EvidenceConfig())
+    benchmark = agency_benchmark(target, rows, EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.supporter_agencies == 2
 
@@ -632,7 +632,7 @@ def test_mixed_facts_collect_stable_reasons(tmp_path: Path) -> None:
     ]
     with _dataset(tmp_path, [_base_row()]) as dataset:
         bundle = build_agency_bundle(_candidate(), _detail(facts), dataset, raw,  # type: ignore[arg-type]
-                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(agency_request_scope=False), AuditConfig(),  # type: ignore[arg-type]
                                      today=date(2026, 10, 13))
     assert bundle is not None
     assert [line.fact_id for line in bundle.lines] == ["F1"]
@@ -782,7 +782,7 @@ def test_key_without_facts_is_never_fetched(tmp_path: Path) -> None:
     raw = _Raw({_LID: (_scaled_row(), *_scaled_peers())})
     with _dataset(tmp_path, [_base_row()]) as dataset:
         bundle = build_agency_bundle(candidate, _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
-                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(agency_request_scope=False), AuditConfig(),  # type: ignore[arg-type]
                                      today=date(2026, 10, 13))
     assert bundle is not None
     assert raw.calls == [_LID]
@@ -800,9 +800,9 @@ def test_none_rows_reject_the_contract(tmp_path: Path) -> None:
 @pytest.mark.parametrize("value", [Decimal("NaN"), Decimal("sNaN"), Decimal("Infinity")])
 def test_nonfinite_delivery_values_are_ignored(value: Decimal) -> None:
     target = _row(unit_price_krw=value)
-    assert agency_benchmark(target, _peers(), EvidenceConfig()) is None
+    assert agency_benchmark(target, _peers(), EvidenceConfig(agency_request_scope=False)) is None
     bad_peer = _row(request_no="bad", amount_krw=value)
-    benchmark = agency_benchmark(_row(), [*_peers(), bad_peer], EvidenceConfig())
+    benchmark = agency_benchmark(_row(), [*_peers(), bad_peer], EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     assert benchmark.supporter_agencies == 2
 
@@ -840,7 +840,7 @@ def test_multiple_anchors_reuse_every_scanned_page(tmp_path: Path) -> None:
 
     target = _scaled_row()
     peers = _scaled_peers()
-    benchmark = agency_benchmark(target, [target, *peers], EvidenceConfig())
+    benchmark = agency_benchmark(target, [target, *peers], EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     base = f"https://savetax.now/listing/{_LID}"
     pages = {
@@ -850,11 +850,11 @@ def test_multiple_anchors_reuse_every_scanned_page(tmp_path: Path) -> None:
     }
     fetcher = _Fetcher(pages)
     cache: dict = {}
-    citation = _cite_anchor(_ITEM, _LID, benchmark, date(2026, 10, 13), EvidenceConfig(), fetcher, cache)  # type: ignore[arg-type]
+    citation = _cite_anchor(_ITEM, _LID, benchmark, date(2026, 10, 13), EvidenceConfig(agency_request_scope=False), fetcher, cache)  # type: ignore[arg-type]
     assert isinstance(citation, tuple)
     absent = replace(benchmark, anchor=peers[0])
     for _ in range(2):
-        assert _cite_anchor(_ITEM, _LID, absent, date(2026, 10, 13), EvidenceConfig(), fetcher, cache) is None  # type: ignore[arg-type]
+        assert _cite_anchor(_ITEM, _LID, absent, date(2026, 10, 13), EvidenceConfig(agency_request_scope=False), fetcher, cache) is None  # type: ignore[arg-type]
     assert fetcher.calls == [base, base + "?dp=2", base + "?dp=3"]
 
 
@@ -863,7 +863,7 @@ def test_unreadable_pages_are_cached(first_status: int) -> None:
     from src.savetax.agencylane import _cite_anchor
 
     target = _scaled_row()
-    benchmark = agency_benchmark(target, [target, *_scaled_peers()], EvidenceConfig())
+    benchmark = agency_benchmark(target, [target, *_scaled_peers()], EvidenceConfig(agency_request_scope=False))
     assert benchmark is not None
     base = f"https://savetax.now/listing/{_LID}"
     fetcher = _Fetcher({
@@ -872,7 +872,7 @@ def test_unreadable_pages_are_cached(first_status: int) -> None:
     })
     cache: dict = {}
     for _ in range(2):
-        assert _cite_anchor(_ITEM, _LID, benchmark, date(2026, 10, 13), EvidenceConfig(), fetcher, cache) == "page_unreadable"  # type: ignore[arg-type]
+        assert _cite_anchor(_ITEM, _LID, benchmark, date(2026, 10, 13), EvidenceConfig(agency_request_scope=False), fetcher, cache) == "page_unreadable"  # type: ignore[arg-type]
     assert fetcher.calls == ([base, base + "?dp=2"] if first_status == 200 else [base])
 
 
@@ -902,3 +902,362 @@ def test_note_prints_scaled_prices_without_fraction_digits(tmp_path: Path) -> No
     assert "60,000원" in evidence.note
     assert "70,000원" in evidence.note
     assert ".0" not in evidence.note
+
+
+def _scoped_values(target_value: object = Decimal("1000")) -> dict[str, Decimal]:
+    return {
+        "R25TA000001": Decimal(str(target_value)),
+        "R25TA000002": Decimal("500"),
+        "R25TA000003": Decimal("800"),
+    }
+
+
+def test_larger_peer_request_is_excluded() -> None:
+    target = _row()
+    rows = [target, *_peers()]
+    values = {"R25TA000001": Decimal("1000"), "R25TA000002": Decimal("2000"), "R25TA000003": Decimal("2000")}
+    assert agency_benchmark(target, rows, EvidenceConfig(), values) is None
+
+
+def test_equal_request_value_is_admissible() -> None:
+    target = _row()
+    values = dict.fromkeys(_scoped_values(), Decimal("1000"))
+    benchmark = agency_benchmark(target, [target, *_peers()], EvidenceConfig(), values)
+    assert benchmark is not None
+    assert benchmark.price_krw == Decimal("70")
+    assert benchmark.target_request_krw == benchmark.anchor_request_krw == Decimal("1000")
+
+
+def test_request_value_sums_sibling_items_once() -> None:
+    from src.savetax.agencylane import request_values
+
+    line_one = _row()
+    line_two = _row(
+        request_no="R25TA000001", line_no="2", agency_name="B구청", unit_price_krw=Decimal("80"),
+        contract_unit_price_krw=Decimal("100"), quantity=Decimal("5"), amount_krw=Decimal("400"),
+        request_date=date(2025, 9, 12),
+    )
+    assert request_values([[line_one], [line_one, line_two]]) == {"R25TA000001": Decimal("1500")}
+
+
+def test_unusable_line_removes_its_request() -> None:
+    from src.savetax.agencylane import request_values
+
+    assert request_values([[_row(), _row(line_no="2", quantity=Decimal("0"), amount_krw=Decimal("0"))]]) == {}
+    assert request_values([[_row(unit_price_krw=Decimal("NaN")), _row(line_no="2")]]) == {}
+
+
+def test_target_without_request_value_yields_no_benchmark() -> None:
+    target = _row()
+    values = {"R25TA000002": Decimal("500"), "R25TA000003": Decimal("800")}
+    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig(), values) is None
+
+
+def test_missing_mapping_yields_no_benchmark() -> None:
+    target = _row()
+    assert agency_benchmark(target, [target, *_peers()], EvidenceConfig()) is None
+
+
+def test_scope_off_keeps_prior_behaviour() -> None:
+    target = _row()
+    values = {"R25TA000001": Decimal("1000"), "R25TA000002": Decimal("2000"), "R25TA000003": Decimal("2000")}
+    benchmark = agency_benchmark(target, [target, *_peers()], EvidenceConfig(agency_request_scope=False), values)
+    assert benchmark is not None
+    assert benchmark.price_krw == Decimal("70")
+    assert benchmark.target_request_krw is None
+    assert benchmark.anchor_request_krw is None
+
+
+def test_mass_price_guard_still_counts_all_agencies() -> None:
+    target, rows = _mass_rows(date(2025, 9, 8))
+    values = {
+        "R25TA000001": Decimal("1000"),
+        "R25TA000100": Decimal("500"),
+        "R25TA000101": Decimal("2000"),
+        "R25TA000102": Decimal("2000"),
+        "R25TA000103": Decimal("2000"),
+        "R25TA000104": Decimal("2000"),
+        "R25TA000099": Decimal("800"),
+    }
+    assert agency_benchmark(target, rows, EvidenceConfig(), values) is None
+
+
+def test_benchmark_carries_both_request_values() -> None:
+    target = _row()
+    benchmark = agency_benchmark(target, [target, *_peers()], EvidenceConfig(), _scoped_values())
+    assert benchmark is not None
+    assert benchmark.target_request_krw == Decimal("1000")
+    assert benchmark.anchor_request_krw == Decimal("800")
+
+
+def test_contract_listings_use_the_contract_column(tmp_path: Path) -> None:
+    from src.savetax.agencylane import contract_order_listings
+
+    rows = [
+        _base_row(listing_id="R26TA020898980001", dlv_key=21),
+        _base_row(listing_id="R26TA02089AA0001", dlv_key=22),
+    ]
+    with _dataset(tmp_path, rows) as dataset:
+        assert contract_order_listings(dataset, "R26TA02089898") == ("R26TA020898980001",)
+
+
+def test_one_listing_per_ordered_key(tmp_path: Path) -> None:
+    from src.savetax.agencylane import contract_order_listings
+
+    rows = [
+        _base_row(),
+        _base_row(listing_id="111111111_0000000002"),
+        _base_row(listing_id="111111111_0000000003", dlv_key=None, dlv_lines=None,
+                  dlv_qty=None, dlv_unit=None, dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+    ]
+    with _dataset(tmp_path, rows) as dataset:
+        assert contract_order_listings(dataset, _CONTRACT) == (_LID,)
+
+
+_OTHER_LID = "222222222_0000000001"
+_OTHER_CONTRACT = "222222222_0"
+_SIBLING_LID = "111111111_0000000002"
+
+
+def _two_key_rows() -> list[dict[str, object]]:
+    return [
+        _base_row(),
+        _base_row(listing_id=_SIBLING_LID, dlv_key=8),
+        _base_row(listing_id=_OTHER_LID, dlv_key=9),
+    ]
+
+
+def _two_contract_candidate() -> AgencyCandidate:
+    return AgencyCandidate(item_id=_ITEM, keys=((_CONTRACT, _LID), (_OTHER_CONTRACT, _OTHER_LID)),
+                           order_amount_krw=2, discount_mass_krw=2)
+
+
+def _two_contract_facts() -> list[Fact]:
+    return [
+        _fact(),
+        _fact(fact_id="F2", listing_id=_OTHER_LID, contract_no=_OTHER_CONTRACT),
+    ]
+
+
+def _other_pages() -> dict[str, tuple[int, str]]:
+    base = f"https://savetax.now/listing/{_OTHER_LID}"
+    return {base: (200, f"<html><body>{_listing_head(_ITEM, _OTHER_LID, '100,000')} "
+                       f"<table>{_anchor_row_html()}</table></body></html>")}
+
+
+@pytest.mark.parametrize("failure", [ApiError("raw", 500, "BACKEND", "m", True), DataIntegrityError("bad rows")])
+def test_sibling_fetch_failure_fails_closed(tmp_path: Path, failure: Exception) -> None:
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers()),
+                _SIBLING_LID: failure,
+                _OTHER_LID: (_scaled_row(), *_scaled_peers())})
+    with _dataset(tmp_path, _two_key_rows()) as dataset:
+        bundle = build_agency_bundle(_two_contract_candidate(), _detail(_two_contract_facts()), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(_other_pages()), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    assert [line.fact_id for line in bundle.lines] == ["F2"]
+    assert {item.fact_id: item.reason for item in bundle.rejected} == {"F1": "request_scope_unavailable"}
+
+
+def test_sibling_rows_unavailable_fails_closed(tmp_path: Path) -> None:
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers()),
+                _SIBLING_LID: None,
+                _OTHER_LID: (_scaled_row(), *_scaled_peers())})
+    with _dataset(tmp_path, _two_key_rows()) as dataset:
+        bundle = build_agency_bundle(_two_contract_candidate(), _detail(_two_contract_facts()), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(_other_pages()), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    assert [line.fact_id for line in bundle.lines] == ["F2"]
+    assert {item.fact_id: item.reason for item in bundle.rejected} == {"F1": "request_scope_unavailable"}
+
+
+def test_too_many_sibling_listings_fails_closed(tmp_path: Path) -> None:
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers()),
+                _SIBLING_LID: (_scaled_row(), *_scaled_peers()),
+                _OTHER_LID: (_scaled_row(), *_scaled_peers())})
+    with _dataset(tmp_path, _two_key_rows()) as dataset:
+        bundle = build_agency_bundle(
+            _two_contract_candidate(), _detail(_two_contract_facts()), dataset, raw,  # type: ignore[arg-type]
+            _Fetcher(_other_pages()), EvidenceConfig(agency_request_listings_max=1),  # type: ignore[arg-type]
+            AuditConfig(), today=date(2026, 10, 13))
+    assert bundle is not None
+    assert [line.fact_id for line in bundle.lines] == ["F2"]
+    assert {item.fact_id: item.reason for item in bundle.rejected} == {"F1": "request_scope_unavailable"}
+    assert raw.calls == [_OTHER_LID]
+
+
+def test_key_listing_rows_are_not_fetched_twice(tmp_path: Path) -> None:
+    base = "https://savetax.now/listing/111111111_0000000001"
+    pages = {base: (200, f"<html><body>{_listing_head(_ITEM, _LID, '100,000')} "
+                           f"<table>{_anchor_row_html()}</table></body></html>")}
+    sibling_rows = (
+        _scaled_row(request_no="R25TA000010", agency_name="H기관", unit_price_krw=Decimal("90000"),
+                    quantity=Decimal("5"), amount_krw=Decimal("450000"), request_date=date(2025, 9, 12)),
+    )
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers()), _SIBLING_LID: sibling_rows})
+    rows = [_base_row(), _base_row(listing_id=_SIBLING_LID, dlv_key=8)]
+    with _dataset(tmp_path, rows) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    assert raw.calls == [_LID, _SIBLING_LID]
+
+
+def test_scoped_bundle_text_names_the_request_control(tmp_path: Path) -> None:
+    base = "https://savetax.now/listing/111111111_0000000001"
+    pages = {base: (200, f"<html><body>{_listing_head(_ITEM, _LID, '100,000')} "
+                             f"<table>{_anchor_row_html()}</table></body></html>")}
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers())})
+    with _dataset(tmp_path, [_base_row()]) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    assert "요구서 전체 규모도 같거나 작은" in bundle.claim
+    assert "요구서 전체 규모(같은 계약의 모든 품목" in bundle.comparison_scope
+    assert "대신 요구서 전체 규모가 더 큰 주문은 비교에서 제외하였다." in bundle.reproduction_notes
+    (evidence,) = bundle.lines[0].price_evidence
+    assert evidence.note is not None
+    assert evidence.note.endswith("이 납품요구 1,000,000원, 비교 800,000원")
+    assert ".0" not in evidence.note.split("요구서 규모")[-1]
+
+
+def test_unscoped_bundle_text_is_unchanged(tmp_path: Path) -> None:
+    from src.savetax.agencylane import _CLAIM_TEMPLATE, _NOTES_TEMPLATE, _SCOPE_TEMPLATE, _format_threshold
+
+    base = "https://savetax.now/listing/111111111_0000000001"
+    pages = {base: (200, f"<html><body>{_listing_head(_ITEM, _LID, '100,000')} "
+                             f"<table>{_anchor_row_html()}</table></body></html>")}
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers())})
+    evidence_cfg = EvidenceConfig(agency_request_scope=False)
+    with _dataset(tmp_path, [_base_row()]) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(pages), evidence_cfg, AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    window = evidence_cfg.agency_window_days
+    floor_pct = int(evidence_cfg.agency_price_floor_ratio * 100)
+    assert bundle.claim == _CLAIM_TEMPLATE.format(item_id=_ITEM, window=window)
+    assert bundle.comparison_scope == _SCOPE_TEMPLATE.format(
+        window=window, supporters=evidence_cfg.agency_min_supporters, floor=floor_pct,
+        mass=evidence_cfg.agency_mass_price_agencies, near=evidence_cfg.agency_near_days,
+        threshold=_format_threshold(evidence_cfg.agency_markup_threshold),
+    )
+    assert bundle.reproduction_notes == _NOTES_TEMPLATE.format(version=dataset.version, floor=floor_pct)
+
+
+def test_shared_listing_id_is_fetched_once(tmp_path: Path) -> None:
+    base = "https://savetax.now/listing/111111111_0000000001"
+    pages = {base: (200, f"<html><body>{_listing_head(_ITEM, _LID, '100,000')} "
+                           f"<table>{_anchor_row_html()}</table></body></html>")}
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers())})
+    rows = [_base_row(), _base_row(dlv_key=8)]
+    with _dataset(tmp_path, rows) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    assert len(bundle.lines) == 1
+    assert raw.calls == [_LID]
+
+
+def test_contract_without_candidate_key_yields_no_benchmark(tmp_path: Path) -> None:
+    candidate = AgencyCandidate(item_id=_ITEM, keys=((_OTHER_CONTRACT, _OTHER_LID),),
+                                order_amount_krw=1, discount_mass_krw=1)
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers())})
+    with _dataset(tmp_path, [_base_row()]) as dataset:
+        bundle = build_agency_bundle(candidate, _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher({}), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is None
+    assert raw.calls == [_LID]
+
+
+def _key_without_orders_rows() -> list[dict[str, object]]:
+    return [
+        _base_row(dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=_SIBLING_LID, dlv_key=8),
+    ]
+
+
+def test_key_listing_without_orders_is_fetched_for_its_request_value(tmp_path: Path) -> None:
+    base = "https://savetax.now/listing/111111111_0000000001"
+    pages = {base: (200, f"<html><body>{_listing_head(_ITEM, _LID, '100,000')} "
+                             f"<table>{_anchor_row_html()}</table></body></html>")}
+    sibling_rows = (
+        _scaled_row(request_no="R25TA000010", agency_name="H기관", unit_price_krw=Decimal("90000"),
+                    quantity=Decimal("5"), amount_krw=Decimal("450000"), request_date=date(2025, 9, 12)),
+    )
+    raw = _Raw({_SIBLING_LID: sibling_rows, _LID: (_scaled_row(), *_scaled_peers())})
+    with _dataset(tmp_path, _key_without_orders_rows()) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    assert len(bundle.lines) == 1
+    assert raw.calls == [_SIBLING_LID, _LID]
+
+
+def test_key_listing_fetch_failure_fails_closed(tmp_path: Path) -> None:
+    sibling_rows = (
+        _scaled_row(request_no="R25TA000010", agency_name="H기관", unit_price_krw=Decimal("90000"),
+                    quantity=Decimal("5"), amount_krw=Decimal("450000"), request_date=date(2025, 9, 12)),
+    )
+    raw = _Raw({_SIBLING_LID: sibling_rows, _LID: ApiError("raw", 500, "BACKEND", "m", True)})
+    with _dataset(tmp_path, _key_without_orders_rows()) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw,  # type: ignore[arg-type]
+                                     _Fetcher({}), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is None
+    assert raw.calls == [_SIBLING_LID, _LID]
+
+
+def test_request_values_are_exact_under_low_decimal_precision() -> None:
+    from decimal import localcontext
+
+    from src.savetax.agencylane import request_values
+
+    first = _row(contract_unit_price_krw=Decimal("12345678901234567890123456789"), quantity=Decimal("2"))
+    second = _row(line_no="2", contract_unit_price_krw=Decimal("0.0001"), quantity=Decimal("3"))
+    with localcontext() as context:
+        context.prec = 6
+        assert request_values([[first, second]]) == {
+            first.request_no: Decimal("24691357802469135780246913578.0003")
+        }
+
+
+@pytest.mark.parametrize("over", [
+    {"quantity": Decimal("0")},
+    {"contract_unit_price_krw": Decimal("-1")},
+    {"amount_krw": Decimal("sNaN")},
+    {"quantity": Decimal("Infinity")},
+    {"quantity": Decimal("11")},
+    {"contract_unit_price_krw": Decimal("101")},
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_unusable_duplicate_invalidates_request_regardless_of_order(over: dict[str, Decimal], reverse: bool) -> None:
+    from src.savetax.agencylane import request_values
+
+    rows = [_row(), _row(**over)]
+    if reverse:
+        rows.reverse()
+    assert request_values([[rows[0]], [rows[1]]]) == {}
+
+
+def test_sibling_item_sizes_exclude_peers_in_bundle(tmp_path: Path) -> None:
+    sibling_rows = tuple(
+        _scaled_row(request_no=peer.request_no, line_no="2", quantity=Decimal("100"),
+                    amount_krw=Decimal("10000000"))
+        for peer in _scaled_peers()
+    )
+    raw = _Raw({_LID: (_scaled_row(), *_scaled_peers()), _SIBLING_LID: sibling_rows})
+    fetcher = _Fetcher({})
+    with _dataset(tmp_path, [_base_row(), _base_row(listing_id=_SIBLING_LID, dlv_key=8)]) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, raw, fetcher,  # type: ignore[arg-type]
+                                     EvidenceConfig(), AuditConfig(), today=date(2026, 10, 13))
+    assert bundle is None
+    assert raw.calls == [_LID, _SIBLING_LID]
+    assert fetcher.calls == []
