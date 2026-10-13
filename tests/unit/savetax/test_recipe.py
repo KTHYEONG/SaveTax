@@ -445,3 +445,98 @@ def test_all_lines_share_seven_part_evidence_and_quantity_arithmetic() -> None:
     assert bundle.lines[0].price_evidence == bundle.lines[1].price_evidence
     assert len(bundle.lines[0].price_evidence) == 7
     assert bundle.rejected[0].reason == "below_threshold"
+
+
+def test_quote_names_the_procurement_item_and_the_equivalence() -> None:
+    ev = _evidence(min_item_expected_krw=0)
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), _recipe(), (_priced(),), _Ds(), ev, today=_TODAY)  # type: ignore[arg-type]
+    assert bundle is not None
+    for cited in bundle.lines[0].price_evidence:
+        assert cited.quote.startswith("[조달 물품 「")
+        assert "I1" in cited.quote
+        assert "동급 대체품" in cited.quote
+        assert len(cited.quote) <= 2000
+
+
+def test_exact_sum_benchmark_uses_observed_sum() -> None:
+    from src.savetax.evidence import PriceEvidence
+
+    def _ev(price: int) -> Any:
+        return PriceEvidence("https://prod.danawa.com/info/?pcode=11", "인용 " + "x" * 10, price, _TODAY, True, False)
+
+    a = PricedPart(_part("k1", "완제품", "11", ("울트라5",)), 1, 900, 900, _ev(900))
+    b = PricedPart(_part("k2", "키보드", "22", ("KM",)), 1, 10, 10, _ev(10))
+    r = _recipe(parts=((a.part, 1), (b.part, 1)), adders=(), sum_label="판매가 합계", exact_sum=True)
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), r, (a, b), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)  # type: ignore[arg-type]
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(910)
+    assert "판매가 합계 910원" in bundle.claim
+
+
+def test_exact_sum_second_lowest_is_unstable() -> None:
+    html = _product_html("울트라5 225 정품", low=100, count=3, offers=[("몰A", 100, "무료"), ("몰B", 130, "무료"), ("몰C", 131, "무료")])
+    r = _recipe(parts=((_part("k9", "CPU", "11", ("울트라5",)), 1),), adders=(), exact_sum=True)
+    out = price_parts(r, _fetcher({"pcode=11": (200, html)}, []), _evidence(recipe_min_offers=1), _TODAY, {})
+    assert out == "part_price_unstable:k9"
+
+
+def test_exact_sum_with_adder_refused() -> None:
+    r = _recipe(adders=(_adder(),), exact_sum=True)
+    with pytest.raises(DomainValidationError, match="adder or floor"):
+        build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), r, (_priced(),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)  # type: ignore[arg-type]
+    r2 = _recipe(adders=(), floor_krw=500, exact_sum=True)
+    with pytest.raises(DomainValidationError, match="adder or floor"):
+        build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), r2, (_priced(),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)  # type: ignore[arg-type]
+
+
+def test_allowed_states_gates_claimed() -> None:
+    from dataclasses import replace
+
+    r = _recipe(adders=())
+    detail = _detail((_fact("f1", "5000"),))
+    claimed = replace(detail, state=ItemState.CLAIMED_BY_ME)
+    assert build_recipe_bundle("I1", claimed, r, (_priced(),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY) is None  # type: ignore[arg-type]
+    bundle = build_recipe_bundle("I1", claimed, r, (_priced(),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY, allowed_states=frozenset({ItemState.CLAIMED_BY_ME}))  # type: ignore[arg-type]
+    assert bundle is not None
+
+
+def test_non_exact_claim_unchanged_with_adders() -> None:
+    priced = (_priced(100, 1, 100),)
+    adders = (_adder("a:1", "조립비", 30), _adder("a:2", "카드리더", 5))
+    r = _recipe(parts=((_part(), 1),), adders=adders)
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), r, priced, _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)  # type: ignore[arg-type]
+    assert bundle is not None
+    assert "부품 합계 100원 + 조립비 30원 + 카드리더 5원 = 135원" in bundle.claim
+
+
+def test_no_adder_floor_raise_keeps_sentence() -> None:
+    r = _recipe(parts=((_part(), 1),), adders=(), floor_krw=500)
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), r, (_priced(100, 1, 100),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)  # type: ignore[arg-type]
+    assert bundle is not None
+    assert "그 값으로 올림 = 500원" in bundle.claim
+
+
+def test_exact_sum_empty_priced_refused() -> None:
+    r = _recipe(parts=(), adders=(), exact_sum=True)
+    with pytest.raises(DomainValidationError):
+        build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), r, (), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("quantity", "unit", "observed", "proof"), [
+    (-1, 100, 100, 100), (True, 100, 100, 100), (1, 130, 100, 100),
+    (1, 100, 100, 90), (1, 0, 0, 100),
+])
+def test_exact_sum_rejects_invalid_or_inconsistent_components(quantity, unit, observed, proof) -> None:
+    from dataclasses import replace
+
+    invalid = PricedPart(_part(), quantity, unit, observed, replace(_priced_evidence(), observed_price_krw=proof))
+    with pytest.raises(DomainValidationError):
+        build_recipe_bundle("I1", _detail((_fact(unit_price="5000"),)), _recipe(adders=(), exact_sum=True),
+                            (_priced(), invalid), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)
+
+
+def test_non_exact_without_adders_preserves_claim_arithmetic() -> None:
+    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="5000"),)), _recipe(adders=()),
+                                (_priced(),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)
+    assert bundle is not None
+    assert "부품 합계 100원 = 100원." in bundle.claim

@@ -22,7 +22,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["DEFAULT_RACK_CLASSES", "DEFAULT_RECIPE_ADDERS", "DEFAULT_RECIPE_PARTS", "DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "EvidenceConfig", "ListingSeries", "RackClass", "RecipeAdder", "RecipePart", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
+__all__ = ["DEFAULT_DESKTOP_PC_REFS", "DEFAULT_RACK_CLASSES", "DEFAULT_RECIPE_ADDERS", "DEFAULT_RECIPE_PARTS", "DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "DesktopPcRef", "EvidenceConfig", "ListingSeries", "RackClass", "RecipeAdder", "RecipePart", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
 
 
 class Secret:
@@ -369,6 +369,15 @@ class RecipeAdder:
     basis: str
 
 
+@dataclass(frozen=True)
+class DesktopPcRef:
+    """Finished reference PC for one CPU class; chipset is the reference mainboard class."""
+
+    cpu_key: str
+    part_key: str
+    chipset: str
+
+
 DEFAULT_RECIPE_PARTS: tuple["RecipePart", ...] = (  # noqa: UP037
     RecipePart("cpu:ULTRA 5 225", "CPU", "74123084", ("울트라5", "225", "정품")),
     RecipePart("cpu:ULTRA 5 235", "CPU", "74123036", ("울트라5", "235", "정품")),
@@ -388,6 +397,10 @@ DEFAULT_RECIPE_PARTS: tuple["RecipePart", ...] = (  # noqa: UP037
     RecipePart("case:tower", "케이스", "33990908", ("TA20",)),
     RecipePart("case:slim", "케이스", "34740608", ("미니멀",)),
     RecipePart("kbm", "키보드·마우스", "21206318", ("KM", "C1")),
+    RecipePart("pc:ULTRA 5 225", "완제품 PC(Ultra 5 225·16GB·512GB)", "77087114", ("AG251", "16GB", "512GB")),
+    RecipePart("pc:ULTRA 5 235", "완제품 PC(Ultra 5 235·16GB·512GB)", "77087300", ("AG351", "16GB", "512GB")),
+    RecipePart("pc:ULTRA 7 265", "완제품 PC(Ultra 7 265·16GB·512GB)", "77087387", ("AG651", "16GB", "512GB")),
+    RecipePart("reader", "카드리더", "17577899", ("IN-UACARD",)),
     RecipePart("panel:24", "24포트 패치판넬(CAT.6A)", "35026826", ("IN-50U6A24P", "24포트")),
     RecipePart("rack:1200", "허브랙 22U", "75600215", ("LD-SGDR750", "H1200")),
     RecipePart("rack:1400", "허브랙 27U", "75600224", ("LD-SGDR750", "H1400")),
@@ -402,6 +415,12 @@ DEFAULT_RECIPE_ADDERS: tuple["RecipeAdder", ...] = (  # noqa: UP037
     RecipeAdder("panel:labor-terminated", "성단·설치 공임", 401649, "정보통신 표준품셈 4-3-3 패치판넬 24포트 성단·설치·결선 공임(부가세 포함), 주최 측 판정 https://savetax.now/222"),
     RecipeAdder("panel:labor-mounted", "설치 공임", 79164, "정보통신 표준품셈 4-3-3 조립된 패치판넬 24포트 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/621"),
     RecipeAdder("rack:labor", "랙 설치 공임", 167310, "정보통신 표준품셈 4-3-3 고정형 19인치 랙 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/176"),
+)
+
+DEFAULT_DESKTOP_PC_REFS: tuple["DesktopPcRef", ...] = (  # noqa: UP037
+    DesktopPcRef("ULTRA 5 225", "pc:ULTRA 5 225", "H810"),
+    DesktopPcRef("ULTRA 5 235", "pc:ULTRA 5 235", "H810"),
+    DesktopPcRef("ULTRA 7 265", "pc:ULTRA 7 265", "B860"),
 )
 
 _PCODE_RE = re.compile(r"^\d{1,12}$")
@@ -588,6 +607,9 @@ class EvidenceConfig:
     rack_width_mm: tuple[int, int] = (550, 650)
     rack_max_depth_mm: int = 750
     rack_exclusion_pattern: str = r"내진|서버|방음|항온|냉방|옥외|벽부|UPS|배터리|CCTV|방진|이동형"
+    desktop_pc_refs: tuple["DesktopPcRef", ...] = DEFAULT_DESKTOP_PC_REFS  # noqa: UP037
+    desktop_chipset_rank: tuple[str, ...] = ("H810", "B860")
+    desktop_pc_max_power_w: int = 500
 
     def __post_init__(self) -> None:
         try:
@@ -719,6 +741,32 @@ class EvidenceConfig:
                 raise ConfigError("[SYS] invalid rack_classes: unknown recipe_parts key")
             if isinstance(entry.floor_krw, bool) or not isinstance(entry.floor_krw, int) or entry.floor_krw <= 0:
                 raise ConfigError("[SYS] invalid rack_classes: floor must be > 0")
+        if not isinstance(self.desktop_pc_refs, tuple) or not self.desktop_pc_refs:
+            raise ConfigError("[SYS] invalid desktop_pc_refs: expected a non-empty tuple")
+        if (
+            not isinstance(self.desktop_chipset_rank, tuple)
+            or not self.desktop_chipset_rank
+            or any(not isinstance(c, str) or not c.strip() for c in self.desktop_chipset_rank)
+            or len(set(self.desktop_chipset_rank)) != len(self.desktop_chipset_rank)
+        ):
+            raise ConfigError("[SYS] invalid desktop_pc_refs: bad chipset rank")
+        if (
+            isinstance(self.desktop_pc_max_power_w, bool)
+            or not isinstance(self.desktop_pc_max_power_w, int)
+            or self.desktop_pc_max_power_w < 1
+        ):
+            raise ConfigError("[SYS] invalid desktop_pc_refs: max power must be >= 1")
+        seen_cpu: set[str] = set()
+        for ref in self.desktop_pc_refs:
+            if not isinstance(ref, DesktopPcRef):
+                raise ConfigError("[SYS] invalid desktop_pc_refs: expected DesktopPcRef")
+            if not isinstance(ref.cpu_key, str) or not ref.cpu_key.strip() or ref.cpu_key in seen_cpu:
+                raise ConfigError("[SYS] invalid desktop_pc_refs: duplicate or empty cpu_key")
+            seen_cpu.add(ref.cpu_key)
+            if not isinstance(ref.part_key, str) or ref.part_key not in part_keys:
+                raise ConfigError(f"[SYS] invalid desktop_pc_refs: unknown part_key {ref.part_key!r}")
+            if ref.chipset not in self.desktop_chipset_rank:
+                raise ConfigError(f"[SYS] invalid desktop_pc_refs: unknown chipset {ref.chipset!r}")
         try:
             re.compile(self.agency_review_name_pattern)
         except re.error:

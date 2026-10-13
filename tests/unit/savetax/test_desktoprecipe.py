@@ -219,3 +219,105 @@ def test_delivery_terms_require_listings_and_matching_identity() -> None:
     assert not delivery_terms_ok(ds, _Raw({}), "missing", "C1", ("납품장소도",), 12)
     wrong = replace(_listing("납품장소도"), item_id="B")
     assert not delivery_terms_ok(ds, _Raw({"L1": wrong}), "A", "C1", ("납품장소도",), 12)
+
+
+def _pc_attrs(**over: str) -> dict[str, str]:
+    base = {
+        "중앙처리장치(CPU)규격": "Intel Core Ultra 5 225",
+        "메모리(RAM)용량": "16",
+        "SSD용량": "512",
+        "하드디스크(HDD)용량": "미장착",
+        "메인보드": "H810",
+        "스위칭모드파워서플라이형식": "500W",
+        "컴퓨터형식": "타워",
+        "그래픽": "내장그래픽",
+        "운영체계": "옵션제공",
+        "광디스크(ODD)규격": "옵션제공",
+    }
+    base.update(over)
+    return base
+
+
+def test_pc_matching_maps_to_finished_pc() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    recipe = desktop_pc_recipe(_pc_attrs(), _evidence())
+    assert not isinstance(recipe, str)
+    assert [p.key for p, _ in recipe.parts] == ["pc:ULTRA 5 225", "kbm"]
+    assert recipe.adders == ()
+    assert recipe.exact_sum is True
+    assert recipe.sum_label == "판매가 합계"
+
+
+def test_pc_hdd_and_reader_add_paged_parts() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    recipe = desktop_pc_recipe(_pc_attrs(**{"하드디스크(HDD)용량": "2", "멀티메모리카드리더유무": "유"}), _evidence())
+    assert not isinstance(recipe, str)
+    assert [p.key for p, _ in recipe.parts] == ["pc:ULTRA 5 225", "hdd:2", "kbm", "reader"]
+
+
+def test_pc_cpu_unmapped_and_board_above() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    assert desktop_pc_recipe(_pc_attrs(**{"중앙처리장치(CPU)규격": "i5-14400"}), _evidence()) == "cpu_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"중앙처리장치(CPU)규격": "Ultra 5 225", "메인보드": "B860"}), _evidence()) == "mainboard_above_reference"
+
+
+def test_pc_lower_board_accepted_with_difference() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    recipe = desktop_pc_recipe(_pc_attrs(**{
+        "중앙처리장치(CPU)규격": "Ultra 7 265", "메인보드": "H810",
+    }), _evidence())
+    assert not isinstance(recipe, str)
+    assert any("메인보드 등급은 기준 제품이 같거나 높다" in d for d in recipe.differences)
+
+
+def test_pc_ram_ssd_psu_hdd_gates() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    assert desktop_pc_recipe(_pc_attrs(**{"메모리(RAM)용량": "32"}), _evidence()) == "ram_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"SSD용량": "1TB"}), _evidence()) == "ssd_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"스위칭모드파워서플라이형식": "700W"}), _evidence()) == "psu_above_reference"
+    assert desktop_pc_recipe(_pc_attrs(**{"스위칭모드파워서플라이형식": "400W"}), _evidence()) != "psu_above_reference"
+    attrs = _pc_attrs()
+    del attrs["스위칭모드파워서플라이형식"]
+    assert not isinstance(desktop_pc_recipe(attrs, _evidence()), str)
+    attrs2 = _pc_attrs()
+    del attrs2["하드디스크(HDD)용량"]
+    assert desktop_pc_recipe(attrs2, _evidence()) == "hdd_unknown"
+
+
+def test_pc_slim_form_and_rejections() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    recipe = desktop_pc_recipe(_pc_attrs(**{"컴퓨터형식": "슬림"}), _evidence())
+    assert not isinstance(recipe, str)
+    assert any("형식이 다르다" in d for d in recipe.differences)
+    assert desktop_pc_recipe(_pc_attrs(**{"그래픽": "RTX 5060"}), _evidence()) == "discrete_graphics"
+    assert desktop_pc_recipe(_pc_attrs(**{"운영체계": "Windows 11"}), _evidence()) == "os_included"
+    assert desktop_pc_recipe(_pc_attrs(**{"광디스크(ODD)규격": "DVD-RW"}), _evidence()) == "odd_included"
+
+
+def test_pc_legacy_cpu_and_bad_specs_fail_closed() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    assert desktop_pc_recipe(_pc_attrs(**{"중앙처리장치(CPU)규격": "i5-13500"}), _evidence()) == "cpu_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"하드디스크(HDD)용량": "4TB"}), _evidence()) == "hdd_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"메인보드": "Q670"}), _evidence()) == "mainboard_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"컴퓨터형식": "빅타워"}), _evidence()) == "form_unmapped"
+    assert desktop_pc_recipe(_pc_attrs(**{"스위칭모드파워서플라이형식": "고출력"}), _evidence()) == "psu_above_reference"
+
+
+def test_pc_unknown_rank_chipset_rejected() -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    assert desktop_pc_recipe(_pc_attrs(**{"메인보드": "H610"}), _evidence()) == "mainboard_unmapped"
+
+
+@pytest.mark.parametrize("power", ["1500.5W", "500W/700W", "-500W", "700W 500W", "9" * 5000 + "W"])
+def test_pc_ambiguous_power_is_rejected(power: str) -> None:
+    from src.savetax.desktoprecipe import desktop_pc_recipe
+
+    assert desktop_pc_recipe(_pc_attrs(**{"스위칭모드파워서플라이형식": power}), _evidence()) == "psu_above_reference"

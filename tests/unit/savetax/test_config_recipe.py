@@ -74,3 +74,51 @@ def test_recipe_tokens_must_be_nonblank_strings(tokens) -> None:
 def test_recipe_threshold_rejects_wrong_types_and_nonfinite_values(threshold) -> None:
     with pytest.raises(ConfigError):
         _evidence(recipe_markup_threshold=threshold)
+
+
+def test_desktop_pc_ref_defaults_link_parts() -> None:
+    from src.savetax.config import DEFAULT_DESKTOP_PC_REFS
+
+    ev = _evidence()
+    assert [r.cpu_key for r in ev.desktop_pc_refs] == ["ULTRA 5 225", "ULTRA 5 235", "ULTRA 7 265"]
+    assert ev.desktop_chipset_rank == ("H810", "B860")
+    assert ev.desktop_pc_max_power_w == 500
+    assert len(DEFAULT_DESKTOP_PC_REFS) == 3
+    keys = {p.key for p in ev.recipe_parts}
+    assert {"pc:ULTRA 5 225", "pc:ULTRA 5 235", "pc:ULTRA 7 265", "reader"} <= keys
+
+
+def test_desktop_pc_ref_rejects_bad_refs() -> None:
+    from src.savetax.config import DesktopPcRef
+
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_pc_refs=(DesktopPcRef("ULTRA 5 225", "missing:key", "H810"),))
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_pc_refs=(DesktopPcRef("ULTRA 5 225", "pc:ULTRA 5 225", "Z999"),))
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_pc_refs=(
+            DesktopPcRef("ULTRA 5 225", "pc:ULTRA 5 225", "H810"),
+            DesktopPcRef("ULTRA 5 225", "pc:ULTRA 5 235", "H810"),
+        ))
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_pc_max_power_w=0)
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_pc_refs=("nope",))  # type: ignore[arg-type]
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_chipset_rank=())
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_pc_refs=())
+
+
+@pytest.mark.parametrize("rank", [None, 500, "H810", ["H810", "B860"]])
+def test_invalid_chipset_rank_types_raise_config_error(rank) -> None:
+    with pytest.raises(ConfigError, match="desktop_pc_refs"):
+        _evidence(desktop_chipset_rank=rank)
+
+
+def test_invalid_reference_field_types_raise_config_error() -> None:
+    from src.savetax.config import DesktopPcRef
+
+    for ref in (DesktopPcRef(None, "pc:ULTRA 5 225", "H810"), DesktopPcRef("ULTRA 5 225", [], "H810")):
+        with pytest.raises(ConfigError, match="desktop_pc_refs"):
+            _evidence(desktop_pc_refs=(ref,))

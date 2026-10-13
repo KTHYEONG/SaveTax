@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
 
@@ -47,6 +47,8 @@ class Recipe:
     precedent_urls: tuple[str, ...]
     title_phrase: str
     floor_krw: int | None = None
+    sum_label: str = "부품 합계"
+    exact_sum: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,8 @@ def price_parts(
             return f"part_identity_mismatch:{part.key}"
         chosen = _chosen_price(product, evidence)
         base = product.low_price_krw if chosen is None else max(product.low_price_krw, chosen)
+        if recipe.exact_sum and base != int(product.low_price_krw):
+            return f"part_price_unstable:{part.key}"
         try:
             proof = PriceEvidence(
                 source_url=url,
@@ -155,7 +159,7 @@ def price_parts(
                 observed_at=today,
                 vat_included=True,
                 shipping_included=False,
-                note=_note(part, quantity, recipe.adders, product, evidence),
+                note=(f"{part.label} {quantity}개 반영. 비교 단가 = {recipe.sum_label}" if recipe.exact_sum else _note(part, quantity, recipe.adders, product, evidence)),
             )
         except DomainValidationError:
             return f"part_page_unreadable:{part.key}"
@@ -199,19 +203,30 @@ def _claim(
     floor: int | None,
     raised: bool,
     kept: int,
+    sum_label: str = "부품 합계",
+    exact_sum: bool = False,
 ) -> str:
     parts_sum = sum(p.unit_price_krw * p.quantity for p in priced)
     labels = ", ".join(p.part.label for p in priced)
-    arithmetic = f"부품 합계 {parts_sum:,}원"
-    for adder in adders:
-        arithmetic += f" + {adder.label} {adder.amount_krw:,}원"
-    subtotal = parts_sum + sum(a.amount_krw for a in adders)
-    arithmetic += f" = {subtotal:,}원"
-    if raised and floor is not None:
-        arithmetic += f" → 주최 측이 같은 급 판정에 쓴 가장 높은 기준가 {floor:,}원보다 낮아 그 값으로 올림 = {benchmark:,}원"
+    if not exact_sum:
+        arithmetic = f"{sum_label} {parts_sum:,}원"
+        for adder in adders:
+            arithmetic += f" + {adder.label} {adder.amount_krw:,}원"
+        subtotal = parts_sum + sum(a.amount_krw for a in adders)
+        arithmetic += f" = {subtotal:,}원"
+        if raised and floor is not None:
+            arithmetic += f" → 주최 측이 같은 급 판정에 쓴 가장 높은 기준가 {floor:,}원보다 낮아 그 값으로 올림 = {benchmark:,}원"
+    else:
+        breakdown = " + ".join(f"{p.part.label} {p.observed_price_krw * p.quantity:,}원" for p in priced)
+        arithmetic = f"{sum_label} {benchmark:,}원 ({breakdown})"
+    comparison = (
+        f"같은 급의 시판 제품({labels}) 판매가 합계와 비교한 것으로 동일 모델 비교가 아니다. "
+        if exact_sum else
+        f"같은 급의 시판 제품({labels}) 판매가에 주최 측이 공개한 가산액을 더한 값과 비교한 것으로 동일 모델 비교가 아니다. "
+    )
     return (
         f"물품식별번호 {item_id}는 조달 전용 모델로 같은 모델의 판매 페이지가 없어 동일 모델 비교가 불가하다. "
-        f"같은 급의 시판 제품({labels}) 판매가에 주최 측이 공개한 가산액을 더한 값과 비교한 것으로 동일 모델 비교가 아니다. "
+        f"{comparison}"
         f"{arithmetic}. 납품요구 단가가 비교 단가의 기준 배율 이상인 납품요구 {kept}건을 비교하였다. "
         "납품요구 기록 기준이며 검수·지급 완료나 특정 업체·기관의 위법·의도를 뜻하지 않는다."
     )
@@ -255,15 +270,30 @@ def build_recipe_bundle(
     evidence: EvidenceConfig,
     *,
     today: date,
+    allowed_states: frozenset[ItemState] = frozenset({ItemState.AVAILABLE}),
 ) -> EvidenceBundle | None:
     """Return the recipe-lane bundle for one item, or None when no line reaches the markup threshold."""
     _ = dataset
     if detail.item_id != item_id:
         raise DataIntegrityError("[DATA] item detail identity mismatch")
-    if detail.state is not ItemState.AVAILABLE:
+    if detail.state not in allowed_states:
         return None
-    benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
-    evidences = tuple(p.evidence for p in priced)
+    if recipe.exact_sum:
+        if recipe.adders or recipe.floor_krw is not None:
+            raise DomainValidationError("[DATA] exact-sum recipe carries an adder or floor")
+        benchmark = recipe_benchmark(priced, ())
+        if any(p.unit_price_krw != p.observed_price_krw or p.observed_price_krw != p.evidence.observed_price_krw for p in priced):
+            raise DomainValidationError("[DATA] exact-sum recipe prices differ from observed evidence")
+    else:
+        benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
+    procured = detail.name or item_id
+    # The server lint compares the declared product with each cited page; naming the procurement item and the
+    # equivalence in the quote lets it read the page as a stated equivalent instead of a wrong product.
+    header = (
+        f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
+        f"비교 단가 {benchmark:,}원의 구성 요소 가격으로, 아래는 그 판매 화면에서 본 내용] "
+    )
+    evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []
     for fact in detail.facts:
@@ -299,7 +329,7 @@ def build_recipe_bundle(
     raised = recipe.floor_krw is not None and benchmark == recipe.floor_krw and (
         sum(p.unit_price_krw * p.quantity for p in priced) + sum(a.amount_krw for a in recipe.adders) < recipe.floor_krw
     )
-    claim = _claim(item_id, priced, recipe.adders, benchmark, recipe.floor_krw, raised, len(lines))
+    claim = _claim(item_id, priced, recipe.adders, benchmark, recipe.floor_krw, raised, len(lines), recipe.sum_label, recipe.exact_sum)
     if len(claim) > 2000:
         raise DomainValidationError("[DATA] recipe claim exceeds text limit")
     bundle = EvidenceBundle(

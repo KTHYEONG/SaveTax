@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--online", action="store_true")
     evidence = sub.add_parser("evidence")
     evidence.add_argument("--lane", choices=("cross", "retail", "agency", "recipe", "all"), default="cross")
-    evidence.add_argument("--recipe-kind", choices=("desktop", "panel", "rack"), default="desktop")
+    evidence.add_argument("--recipe-kind", choices=("desktop", "desktop-pc", "panel", "rack"), default="desktop")
     evidence.add_argument("--limit", type=int, default=50)
     evidence.add_argument("--items")
     evidence.add_argument("--batch", type=int, default=0)
@@ -435,22 +435,28 @@ def _run_recipe_lane(
     limit: int,
     include_review: bool,
     recipe_kind: str,
+    owned: bool = False,
 ) -> tuple[int, int, int]:
     from src.savetax.danawa import DanawaProduct
-    from src.savetax.desktoprecipe import delivery_terms_ok, desktop_recipe, find_recipe_candidates
+    from src.savetax.desktoprecipe import delivery_terms_ok, desktop_pc_recipe, desktop_recipe, find_recipe_candidates
     from src.savetax.errors import DataIntegrityError
     from src.savetax.evidence import RejectedFact
     from src.savetax.fixturerecipe import panel_recipe, rack_recipe
 
     _ = audit
-    if recipe_kind == "desktop":
+    if owned and not wanted:
+        raise ConfigError("[SYS] owned recipe mode requires --items")
+    if recipe_kind in ("desktop", "desktop-pc"):
         category = evidence.desktop_category
     elif recipe_kind == "panel":
         category = evidence.panel_category
     elif recipe_kind == "rack":
         category = evidence.rack_category
     else:
-        raise ConfigError(f"[SYS] invalid recipe_kind: {recipe_kind!r} must be desktop, panel or rack")
+        raise ConfigError(f"[SYS] invalid recipe_kind: {recipe_kind!r} must be desktop, desktop-pc, panel or rack")
+    allowed = frozenset({ItemState.CLAIMED_BY_ME}) if owned else frozenset({ItemState.AVAILABLE})
+    bundle_path = Path(out_dir) / "owned" / "recipe-bundles.jsonl" if owned else Path(out_dir) / "recipe-bundles.jsonl"
+    draft_dir = Path(out_dir) / "owned" / "drafts" / "recipe" if owned else Path(out_dir) / "drafts" / "recipe"
     bundles: list[EvidenceBundle] = []
     candidates_n = 0
     available_n = 0
@@ -459,7 +465,7 @@ def _run_recipe_lane(
         found = find_recipe_candidates(dataset, category, items=wanted)
         candidates_n = len(found)
         states = {result.input: result.state for result in competition.lookup_items(found)} if found else {}
-        available = [item for item in found if states.get(item) is ItemState.AVAILABLE]
+        available = [item for item in found if states.get(item) in allowed]
         available_n = len(available)
         event = competition.get_event()
         today = date.today()
@@ -476,6 +482,12 @@ def _run_recipe_lane(
                         logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
                         continue
                     detail = competition.get_item(item_id)
+                elif recipe_kind == "desktop-pc":
+                    recipe = desktop_pc_recipe(attributes, evidence)
+                    if isinstance(recipe, str):
+                        logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
+                        continue
+                    detail = competition.get_item(item_id)
                 else:
                     detail = competition.get_item(item_id)
                     item_name = detail.name or ""
@@ -486,7 +498,9 @@ def _run_recipe_lane(
                     if isinstance(recipe, str):
                         logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
                         continue
-                if recipe_kind == "desktop":
+                if owned and (detail.facts_total is None or detail.facts_truncated or detail.facts_total != len(detail.facts)):
+                    raise DataAccessPending("[DATA] own item facts unavailable: 자료 접근 대기")
+                if recipe_kind in ("desktop", "desktop-pc"):
                     bad_contracts = {
                         contract_no
                         for contract_no in {fact.contract_no for fact in detail.facts}
@@ -504,7 +518,7 @@ def _run_recipe_lane(
                 if isinstance(priced, str):
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, priced)
                     continue
-                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today)
+                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today, allowed_states=allowed)
                 if bundle is None:
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, "below_threshold")
                     continue
@@ -514,7 +528,7 @@ def _run_recipe_lane(
                 if bundle.review_required and not include_review:
                     continue
                 body = build_draft_body(bundle, event, evidence)
-                write_draft(body, Path(out_dir) / "drafts" / "recipe" / f"{bundle.item_id}.json")
+                write_draft(body, draft_dir / f"{bundle.item_id}.json")
                 drafts += 1
                 benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
                 logger.info(
@@ -525,7 +539,7 @@ def _run_recipe_lane(
                 logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, redact(str(exc)))
                 continue
     finally:
-        write_bundles(bundles, Path(out_dir) / "recipe-bundles.jsonl")
+        write_bundles(bundles, bundle_path)
         expected = sum(b.expected_total_krw for b in bundles)
         logger.info(
             "[EVIDENCE] lane=recipe candidates=%d available=%d bundles=%d drafts=%d expected_krw=%d",
@@ -557,11 +571,6 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
     )
     audit = AuditConfig()
     out_dir = args.out_dir if args.out_dir is not None else evidence.evidence_dir
-    token = load_token(config, os.environ if environ is None else environ)
-    http = HttpClient(config, token, transport=urllib_transport if transport is None else transport, sleep=time.sleep)
-    competition = CompetitionClient(http, config, sleep=time.sleep)
-    raw = RawApiClient(http, config, sleep=time.sleep)
-    fetcher = PublicFetcher(config, evidence, transport=urllib_transport if transport is None else transport)
     wanted: list[str] | None = None
     if args.items is not None:
         wanted = [part.strip() for part in str(args.items).split(",") if part.strip()]
@@ -570,12 +579,23 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
     owned = bool(getattr(args, "owned", False))
     if owned and args.lane == "agency":
         raise ConfigError("[SYS] owned mode rejects the agency lane")
-    if owned and args.lane == "recipe":
-        raise ConfigError("[SYS] owned mode rejects the recipe lane")
+    if owned and args.lane == "recipe" and not wanted:
+        raise ConfigError("[SYS] owned recipe mode requires --items")
+    token = load_token(config, os.environ if environ is None else environ)
+    http = HttpClient(config, token, transport=urllib_transport if transport is None else transport, sleep=time.sleep)
+    competition = CompetitionClient(http, config, sleep=time.sleep)
+    raw = RawApiClient(http, config, sleep=time.sleep)
+    fetcher = PublicFetcher(config, evidence, transport=urllib_transport if transport is None else transport)
     conflict_dir = Path(out_dir) / "remediation" if owned else Path(out_dir)
     try:
         with Dataset(config, audit) as dataset:
-            if owned:
+            if owned and args.lane == "recipe":
+                _run_recipe_lane(
+                    competition, raw, fetcher, evidence, audit, Path(out_dir),
+                    dataset, wanted, limit, args.include_review, args.recipe_kind,
+                    owned=True,
+                )
+            elif owned:
                 remediation_out = Path(out_dir) / "remediation"
                 _run_cross_lane(
                     competition, raw, fetcher, evidence, audit, remediation_out,
@@ -606,6 +626,7 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
                     _run_recipe_lane(
                         competition, raw, fetcher, evidence, audit, Path(out_dir),
                         dataset, wanted, limit, args.include_review, args.recipe_kind,
+                        owned=owned,
                     )
     finally:
         _append_unit_conflicts(conflict_dir, records)

@@ -155,13 +155,13 @@ def test_recipe_lane_skips_unmapped(tmp_path: Path) -> None:
 
 def test_parser_has_recipe_lane_and_owned_rejected() -> None:
     parser = _build_parser()
-    args = parser.parse_args(["evidence", "--lane", "recipe", "--recipe-kind", "desktop"])
+    args = parser.parse_args(["evidence", "--lane", "recipe", "--recipe-kind", "desktop-pc"])
     assert args.lane == "recipe"
-    assert args.recipe_kind == "desktop"
+    assert args.recipe_kind == "desktop-pc"
     from src.savetax.cli import _run_evidence
 
     owned_args = parser.parse_args(["evidence", "--lane", "recipe", "--owned"])
-    with pytest.raises(ConfigError, match="owned mode rejects the recipe lane"):
+    with pytest.raises(ConfigError, match="owned recipe mode requires --items"):
         _run_evidence(owned_args, {"SAVETAX_TOKEN": "savetax_test"}, None)
 
 
@@ -310,3 +310,141 @@ def test_workflow_loads_recipe_drafts_and_bundles(tmp_path: Path) -> None:
     assert entries[0][2].lane is Lane.RECIPE
     single = _single_draft(out / "drafts" / "recipe" / "I1.json", out, datetime.now(UTC))
     assert single[0][2].lines == entries[0][2].lines
+
+
+def _pc_names() -> dict[str, str]:
+    names = dict(_NAMES)
+    names.update({
+        "77087114": "리메이드 AG251 16GB 512GB",
+        "77087300": "리메이드 AG351 16GB 512GB",
+        "77087387": "리메이드 AG651 16GB 512GB",
+        "17577899": "IN-UACARD 카드리더",
+    })
+    return names
+
+
+def _pc_fetcher(evidence: EvidenceConfig) -> PublicFetcher:
+    names = _pc_names()
+
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        pcode = url.rsplit("pcode=", 1)[-1]
+        body = _product_html(names.get(pcode, "X"), 100000)
+        return HttpResponse(status=200, headers={}, body=body.encode(), elapsed_seconds=0.01)
+
+    return PublicFetcher(SaveTaxConfig(), evidence, transport=transport)  # type: ignore[arg-type]
+
+
+def test_desktop_pc_lane_writes_bundle(tmp_path: Path) -> None:
+    evidence = EvidenceConfig(recipe_min_offers=1)
+    out = tmp_path / "out"
+    n, avail, drafts = _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence),
+                                        evidence, AuditConfig(), out, _dataset(tmp_path), None, 10, False, "desktop-pc")
+    assert (n, avail, drafts) == (1, 1, 1)
+    assert (out / "recipe-bundles.jsonl").is_file()
+
+
+def test_owned_recipe_run_writes_under_owned(tmp_path: Path) -> None:
+    from src.savetax.competition import ItemState as _State
+
+    class _OwnedComp(_Competition):
+        def lookup_items(self, ids: list[str]) -> list[LookupResult]:
+            return [LookupResult(i, "product", i, _State.CLAIMED_BY_ME) for i in ids]
+
+        def get_item(self, item_id: str) -> ItemDetail:
+            return ItemDetail(item_id, _State.CLAIMED_BY_ME, "n", "m", None, None, None, 1, False, (Fact(
+                "f1", "L1", "C1", "R1", "1", date(2026, 1, 5), "대", "tax", "B1", "none",
+                Decimal(2000000), Decimal(2), Decimal(4000000), True, ()),))
+
+    evidence = EvidenceConfig()
+    out = tmp_path / "out"
+    n, avail, drafts = _run_recipe_lane(_OwnedComp((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence),
+                                        evidence, AuditConfig(), out, _dataset(tmp_path), ["I1"], 10, False, "desktop-pc", owned=True)
+    assert drafts == 1
+    assert (out / "owned" / "recipe-bundles.jsonl").is_file()
+    assert (out / "owned" / "drafts" / "recipe" / "I1.json").is_file()
+    assert not (out / "drafts").exists()
+
+
+def test_owned_recipe_available_skipped(tmp_path: Path) -> None:
+    evidence = EvidenceConfig()
+    out = tmp_path / "out"
+    _, avail, drafts = _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _fetcher(evidence),
+                                        evidence, AuditConfig(), out, _dataset(tmp_path), ["I1"], 10, False, "desktop", owned=True)
+    assert avail == 0
+    assert drafts == 0
+
+
+def test_invalid_recipe_kind_rejected(tmp_path: Path) -> None:
+    from src.savetax.errors import ConfigError
+
+    evidence = EvidenceConfig()
+    with pytest.raises(ConfigError, match="invalid recipe_kind"):
+        _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _fetcher(evidence),
+                         evidence, AuditConfig(), tmp_path / "out", _dataset(tmp_path), None, 10, False, "nope")
+
+
+def test_desktop_pc_unmapped_skipped(tmp_path: Path) -> None:
+    bad = _attrs()
+    bad["중앙처리장치(CPU)규격"] = "i5-14400"
+    evidence = EvidenceConfig()
+    _, _, drafts = _run_recipe_lane(_Competition((_fact(),)), _Raw(bad), _pc_fetcher(evidence),
+                                    evidence, AuditConfig(), tmp_path / "out", _dataset(tmp_path), None, 10, False, "desktop-pc")
+    assert drafts == 0
+
+
+def test_run_evidence_owned_recipe_delegates(tmp_path: Path, monkeypatch: Any) -> None:
+    import src.savetax.cli as cli
+
+    base = {
+        "limit": 5, "batch": 0, "batches": 1, "data_dir": None, "out_dir": tmp_path / "o",
+        "items": "I1", "include_review": False, "unit_policy": "annotate",
+        "variant_policy": "series", "recipe_kind": "desktop-pc",
+    }
+    calls: dict[str, Any] = {}
+
+    def _fake_run(*args: Any, **kwargs: Any) -> tuple[int, int, int]:
+        calls["owned"] = kwargs.get("owned", False)
+        return (1, 1, 1)
+
+    class _FakeDataset:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> Any:
+            return SimpleNamespace()
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "_run_recipe_lane", _fake_run)
+    monkeypatch.setattr(cli, "Dataset", _FakeDataset)
+    code = cli._run_evidence(argparse.Namespace(lane="recipe", owned=True, **base), {"SAVETAX_TOKEN": "savetax_x"}, None)
+    assert code == 0
+    assert calls.get("owned") is True
+
+
+def test_owned_recipe_requires_items_at_lane_entry(tmp_path: Path) -> None:
+    evidence = EvidenceConfig()
+    with pytest.raises(ConfigError, match="requires --items"):
+        _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence), evidence,
+                         AuditConfig(), tmp_path, _dataset(tmp_path), None, 10, False, "desktop-pc", owned=True)
+
+
+@pytest.mark.parametrize(("total", "truncated"), [(None, False), (2, False), (1, True)])
+def test_owned_recipe_refuses_incomplete_facts(tmp_path: Path, total, truncated) -> None:
+    from dataclasses import replace
+    from src.savetax.errors import DataAccessPending
+
+    class OwnedCompetition(_Competition):
+        def lookup_items(self, ids: list[str]) -> list[LookupResult]:
+            return [LookupResult(i, "product", i, ItemState.CLAIMED_BY_ME) for i in ids]
+
+        def get_item(self, item_id: str) -> ItemDetail:
+            return replace(super().get_item(item_id), state=ItemState.CLAIMED_BY_ME,
+                           facts_total=total, facts_truncated=truncated)
+
+    evidence = EvidenceConfig()
+    with pytest.raises(DataAccessPending):
+        _run_recipe_lane(OwnedCompetition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence), evidence,
+                         AuditConfig(), tmp_path, _dataset(tmp_path), ["I1"], 10, False, "desktop-pc", owned=True)
+    assert not (tmp_path / "owned" / "drafts").exists()
