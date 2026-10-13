@@ -456,6 +456,8 @@ def test_quote_names_the_procurement_item_and_the_equivalence() -> None:
         assert cited.quote.startswith("[조달 물품 「")
         assert "I1" in cited.quote
         assert "동급 대체품" in cited.quote
+        assert "을 더해 정한 값이며 그 금액은 이 화면에 없다" in cited.quote
+        assert f"{bundle.lines[0].benchmark_unit_price_krw:,}" not in cited.quote
         assert len(cited.quote) <= 2000
 
 
@@ -472,8 +474,12 @@ def test_exact_sum_benchmark_uses_observed_sum() -> None:
     assert bundle is not None
     assert bundle.lines[0].benchmark_unit_price_krw == Decimal(910)
     assert "판매가 합계 910원" in bundle.claim
-    assert "910원(= 완제품 900원 + 키보드 10원)" in bundle.lines[0].price_evidence[0].quote
-    assert "이 판매 화면에서 본 가격은 10원이고" in bundle.lines[0].price_evidence[1].quote
+    first, second = bundle.lines[0].price_evidence
+    assert "가격 근거 1/2. 이 판매 화면에서 본 가격은 900원이다" in first.quote
+    assert "가격 근거 2/2. 이 판매 화면에서 본 가격은 10원이다" in second.quote
+    assert "근거 2개 판매 화면 가격을 모두 더한 값" in first.quote
+    assert "910" not in first.quote
+    assert "910" not in second.quote
 
 
 def test_exact_sum_second_lowest_is_unstable() -> None:
