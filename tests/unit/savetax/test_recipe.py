@@ -473,6 +473,7 @@ def test_exact_sum_benchmark_uses_observed_sum() -> None:
     assert bundle.lines[0].benchmark_unit_price_krw == Decimal(910)
     assert "판매가 합계 910원" in bundle.claim
     assert "910원(= 완제품 900원 + 키보드 10원)" in bundle.lines[0].price_evidence[0].quote
+    assert "이 판매 화면에서 본 가격은 10원이고" in bundle.lines[0].price_evidence[1].quote
 
 
 def test_exact_sum_second_lowest_is_unstable() -> None:

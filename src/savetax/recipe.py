@@ -301,12 +301,18 @@ def build_recipe_bundle(
     procured = detail.name or item_id
     # The server lint compares the declared product with each cited page; naming the procurement item and the
     # equivalence in the quote lets it read the page as a stated equivalent instead of a wrong product.
-    header = (
-        f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
-        f"비교 단가 {benchmark:,}원{_sum_expression(priced) if recipe.exact_sum else ''}의 구성 요소 가격으로, "
-        "아래는 그 판매 화면에서 본 내용] "
+    declared = f"{benchmark:,}원{_sum_expression(priced) if recipe.exact_sum else ''}"
+    evidences = tuple(
+        replace(
+            p.evidence,
+            quote=(
+                f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
+                f"이 판매 화면에서 본 가격은 {p.evidence.observed_price_krw:,}원이고, 이 가격은 선언한 비교 단가(합계) {declared}의 "
+                "구성 요소다. 아래는 그 판매 화면에서 본 내용] " + p.evidence.quote
+            )[:2000],
+        )
+        for p in priced
     )
-    evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []
     for fact in detail.facts:
