@@ -118,6 +118,7 @@ def test_benchmark_sums_parts_times_quantity_plus_adders() -> None:
     priced = price_parts(r, fetcher, _evidence(recipe_min_offers=1), _TODAY, {})
     assert not isinstance(priced, str)
     assert recipe_benchmark(priced, r.adders) == 100 + 50 * 2 + 35
+    assert "/ 상세 스펙 d / 최저가" in priced[0].evidence.quote
 
 
 def test_floor_raises_lower_sum_and_keeps_higher() -> None:
@@ -471,6 +472,7 @@ def test_exact_sum_benchmark_uses_observed_sum() -> None:
     assert bundle is not None
     assert bundle.lines[0].benchmark_unit_price_krw == Decimal(910)
     assert "판매가 합계 910원" in bundle.claim
+    assert "910원(= 완제품 900원 + 키보드 10원)" in bundle.lines[0].price_evidence[0].quote
 
 
 def test_exact_sum_second_lowest_is_unstable() -> None:

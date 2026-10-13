@@ -62,6 +62,9 @@ class PricedPart:
     evidence: PriceEvidence
 
 
+_QUOTE_SPEC_CHARS = 400
+
+
 def _ordered(product: DanawaProduct) -> list[MallOffer]:
     return sorted(product.offers, key=lambda o: (o.price_krw, o.mall))
 
@@ -90,11 +93,20 @@ def _chosen_price(product: DanawaProduct, evidence: EvidenceConfig) -> int | Non
     return offers[0].price_krw
 
 
+def _sum_expression(priced: Sequence[PricedPart]) -> str:
+    terms = " + ".join(f"{p.part.label} {p.unit_price_krw * p.quantity:,}원" for p in priced)
+    return f"(= {terms})"
+
+
 def _quote(part: RecipePart, product: DanawaProduct, today: date) -> str:
     count = _offer_count(product)
     sellers = ", ".join(f"{o.mall} {o.price_krw:,}원" for o in _ordered(product)[:3])
     low = product.low_price_krw or 0
-    head = f"[동급 사양 비교의 {part.label}] {product.name} / 최저가 {low:,}원 / 판매자 {count}곳"
+    head = f"[동급 사양 비교의 {part.label}] {product.name}"
+    spec = " ".join(product.description.split())[:_QUOTE_SPEC_CHARS]
+    if spec:
+        head += f" / 상세 스펙 {spec}"
+    head += f" / 최저가 {low:,}원 / 판매자 {count}곳"
     if sellers:
         head += f" / {sellers}"
     return head + f" / 다나와 상품 페이지, {today} 확인"
@@ -291,7 +303,8 @@ def build_recipe_bundle(
     # equivalence in the quote lets it read the page as a stated equivalent instead of a wrong product.
     header = (
         f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
-        f"비교 단가 {benchmark:,}원의 구성 요소 가격으로, 아래는 그 판매 화면에서 본 내용] "
+        f"비교 단가 {benchmark:,}원{_sum_expression(priced) if recipe.exact_sum else ''}의 구성 요소 가격으로, "
+        "아래는 그 판매 화면에서 본 내용] "
     )
     evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
     lines: list[LineProposal] = []
