@@ -65,8 +65,16 @@ def test_small_panel_is_rejected() -> None:
     assert panel_recipe("패치", {"종류": "패치판넬", "옵션": "12PORT CAT.6A"}, _evidence()) == "ports_unknown"
 
 
-def test_missing_grade_is_rejected() -> None:
-    assert panel_recipe("패치", {"종류": "패치판넬", "옵션": "24PORT"}, _evidence()) == "category_unknown"
+def test_unstated_grade_uses_the_top_copper_reference() -> None:
+    recipe = panel_recipe("패치", {"종류": "패치판넬", "옵션": "24PORT"}, _evidence())
+    assert not isinstance(recipe, str)
+    assert ("등급", "표기 없음", "CAT.6A") in recipe.spec_rows
+    assert len(recipe.differences) == 2
+
+
+@pytest.mark.parametrize("text", ["24PORT CAT.7", "24PORT CAT8", "24PORT 광패치", "24PORT LC duplex"])
+def test_grade_above_the_reference_is_rejected(text: str) -> None:
+    assert panel_recipe("패치", {"종류": "패치판넬", "옵션": text}, _evidence()) == "category_out_of_class"
 
 
 def test_non_panel_is_rejected() -> None:

@@ -18,6 +18,9 @@ _CAT_RE = re.compile(r"CAT\.?\s*6A?", re.IGNORECASE)
 _UNTERMINATED_RE = re.compile(r"성단\s*제외")
 _REVIEW_RE = re.compile(r"측면개폐|접지|멀티탭")
 _DIM_KEEP_RE = re.compile(r"[^0-9.]")
+_ABOVE_CLASS_RE = re.compile(r"CAT\.?\s*[78]|광|FIBER|OPTIC|(?<![A-Za-z])(?:LC|SC)(?![A-Za-z])", re.IGNORECASE)
+_LABOR_DIFFERENCE = "공임은 주최 측이 공개한 정보통신 표준품셈 4-3-3 기준가로 납품에 성단이 포함됐는지와 관계없이 더했다"
+_GRADE_DIFFERENCE = "조달 품목에 케이블 등급 표기가 없어 가장 높은 구리선 등급인 CAT.6A 패치판넬을 기준으로 삼았다"
 
 
 def _by_key(parts: Sequence["RecipePart"], key: str) -> RecipePart:  # noqa: UP037
@@ -56,8 +59,10 @@ def panel_recipe(name: str, attributes: Mapping[str, str], evidence: EvidenceCon
     if _PORT_OTHER_RE.search(text) is not None:
         return "ports_ambiguous"
     cat = _CAT_RE.search(text)
-    if cat is None:
-        return "category_unknown"
+    # The reference panel is CAT.6A, so an unstated copper grade cannot exceed it; only higher or optical grades do.
+    if cat is None and _ABOVE_CLASS_RE.search(text) is not None:
+        return "category_out_of_class"
+    grade = cat.group(0).strip() if cat is not None else "표기 없음"
     unterminated = _UNTERMINATED_RE.search(text) is not None
     adder_key = "panel:labor-mounted" if unterminated else "panel:labor-terminated"
     floor = evidence.panel_floor_unterminated_krw if unterminated else evidence.panel_floor_krw
@@ -65,7 +70,7 @@ def panel_recipe(name: str, attributes: Mapping[str, str], evidence: EvidenceCon
     adder = _adder_by_key(evidence.recipe_adders, adder_key)
     spec_rows = (
         ("포트 수", "24", "24"),
-        ("등급", cat.group(0).strip(), "CAT.6A"),
+        ("등급", grade, "CAT.6A"),
         ("취부형태", _mount_proc(attributes), "19인치 랙형"),
     )
     return Recipe(
@@ -73,7 +78,7 @@ def panel_recipe(name: str, attributes: Mapping[str, str], evidence: EvidenceCon
         parts=((part, 1),),
         adders=(adder,),
         spec_rows=spec_rows,
-        differences=("공임은 주최 측이 공개한 정보통신 표준품셈 4-3-3 기준가로 납품에 성단이 포함됐는지와 관계없이 더했다",),
+        differences=(_LABOR_DIFFERENCE, *(() if cat is not None else (_GRADE_DIFFERENCE,))),
         review_required=False,
         precedent_urls=("https://savetax.now/222", "https://savetax.now/540", "https://savetax.now/237"),
         title_phrase="동급 패치판넬 판매가와 공식 설치 공임 합계",
