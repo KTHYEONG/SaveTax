@@ -22,7 +22,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "EvidenceConfig", "ListingSeries", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
+__all__ = ["DEFAULT_RECIPE_ADDERS", "DEFAULT_RECIPE_PARTS", "DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "EvidenceConfig", "ListingSeries", "RecipeAdder", "RecipePart", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
 
 
 class Secret:
@@ -332,6 +332,87 @@ DEFAULT_SERIES_BLOCKS: tuple[SeriesBlock, ...] = (
 
 
 @dataclass(frozen=True)
+class RecipePart:
+    """One reference product of a recipe: Danawa catalogue code and the tokens its page name must contain."""
+
+    key: str
+    label: str
+    pcode: str
+    name_tokens: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecipeAdder:
+    """A fixed KRW amount added to the benchmark without a sale page, with its published basis."""
+
+    key: str
+    label: str
+    amount_krw: int
+    basis: str
+
+
+DEFAULT_RECIPE_PARTS: tuple["RecipePart", ...] = (  # noqa: UP037
+    RecipePart("cpu:ULTRA 5 225", "CPU", "74123084", ("울트라5", "225", "정품")),
+    RecipePart("cpu:ULTRA 5 235", "CPU", "74123036", ("울트라5", "235", "정품")),
+    RecipePart("cpu:ULTRA 7 265", "CPU", "74122856", ("울트라7", "265")),
+    RecipePart("cpu:I5 14400", "CPU", "32038580", ("i5", "14400", "정품")),
+    RecipePart("cpu:I5 14500", "CPU", "32038256", ("i5", "14500", "정품")),
+    RecipePart("cpu:I7 14700", "CPU", "32038001", ("i7", "14700", "정품")),
+    RecipePart("ram:16", "메모리 16GB", "18965774", ("DDR5", "5600", "16GB")),
+    RecipePart("ssd:500", "SSD 500GB", "29655680", ("T500", "500GB")),
+    RecipePart("hdd:2", "HDD 2TB", "13522751", ("WD", "Blue", "2TB")),
+    RecipePart("mb:H610", "메인보드", "28183691", ("H610M",)),
+    RecipePart("mb:H810", "메인보드", "104616128", ("H810M",)),
+    RecipePart("mb:B760", "메인보드", "20738630", ("B760M",)),
+    RecipePart("mb:B860", "메인보드", "104966246", ("B860M",)),
+    RecipePart("psu:500W", "전원", "19281344", ("500W",)),
+    RecipePart("psu:400W", "전원", "18564248", ("400", "TFX")),
+    RecipePart("case:tower", "케이스", "33990908", ("TA20",)),
+    RecipePart("case:slim", "케이스", "34740608", ("미니멀",)),
+    RecipePart("kbm", "키보드·마우스", "21206318", ("KM", "C1")),
+)
+
+DEFAULT_RECIPE_ADDERS: tuple["RecipeAdder", ...] = (  # noqa: UP037
+    RecipeAdder("desktop:assembly", "조립비", 25000, "주최 측 데스크톱 판정의 조립비(https://savetax.now/405)"),
+    RecipeAdder("desktop:reader", "카드리더", 5600, "주최 측 데스크톱 판정의 카드리더 가격(https://savetax.now/405)"),
+)
+
+_PCODE_RE = re.compile(r"^\d{1,12}$")
+
+
+def _check_recipe_parts(parts: object) -> tuple["RecipePart", ...]:  # noqa: UP037
+    if not isinstance(parts, tuple):
+        raise ConfigError("[SYS] invalid recipe_parts: expected a tuple")
+    seen: set[str] = set()
+    for part in parts:
+        if not isinstance(part, RecipePart):
+            raise ConfigError("[SYS] invalid recipe_parts: expected RecipePart")
+        if not isinstance(part.key, str) or not part.key.strip() or part.key in seen:
+            raise ConfigError("[SYS] invalid recipe_parts: duplicate or empty key")
+        seen.add(part.key)
+        if not isinstance(part.pcode, str) or not _PCODE_RE.fullmatch(part.pcode):
+            raise ConfigError("[SYS] invalid recipe_parts: pcode must match ^\\d{1,12}$")
+        if not isinstance(part.name_tokens, tuple) or not part.name_tokens or any(not isinstance(token, str) or not token.strip() for token in part.name_tokens):
+            raise ConfigError("[SYS] invalid recipe_parts: name_tokens must be non-empty")
+    return parts
+
+
+def _check_recipe_adders(adders: object) -> tuple["RecipeAdder", ...]:  # noqa: UP037
+    if not isinstance(adders, tuple):
+        raise ConfigError("[SYS] invalid recipe_adders: expected a tuple")
+    seen: set[str] = set()
+    for adder in adders:
+        if not isinstance(adder, RecipeAdder):
+            raise ConfigError("[SYS] invalid recipe_adders: expected RecipeAdder")
+        if not isinstance(adder.key, str) or not adder.key.strip() or adder.key in seen:
+            raise ConfigError("[SYS] invalid recipe_adders: duplicate or empty key")
+        seen.add(adder.key)
+        if isinstance(adder.amount_krw, bool) or not isinstance(adder.amount_krw, int) or adder.amount_krw <= 0:
+            raise ConfigError("[SYS] invalid recipe_adders: amount_krw must be > 0")
+    return adders
+
+
+@dataclass(frozen=True)
 class EvidenceConfig:
     """Thresholds, public hosts and output paths for evidence collection."""
 
@@ -463,6 +544,14 @@ class EvidenceConfig:
     agency_review_name_pattern: str = r"\d~\d"
     agency_request_scope: bool = True
     agency_request_listings_max: int = 200
+    recipe_markup_threshold: Decimal = Decimal("1.20")
+    recipe_min_offers: int = 3
+    recipe_listings_max: int = 12
+    recipe_parts: tuple["RecipePart", ...] = DEFAULT_RECIPE_PARTS  # noqa: UP037
+    recipe_adders: tuple["RecipeAdder", ...] = DEFAULT_RECIPE_ADDERS  # noqa: UP037
+    desktop_category: str = "데스크톱컴퓨터"
+    desktop_delivery_terms: tuple[str, ...] = ("납품장소도",)
+    desktop_os_optional_values: tuple[str, ...] = ("옵션제공", "옵션 제공", "선택", "옵션품목(복구솔루션)")
 
     def __post_init__(self) -> None:
         try:
@@ -545,6 +634,16 @@ class EvidenceConfig:
             raise ConfigError("[SYS] invalid agency_request_listings_max: must be >= 1")
         if self.agency_request_listings_max < 1:
             raise ConfigError("[SYS] invalid agency_request_listings_max: must be >= 1")
+        if not isinstance(self.recipe_markup_threshold, Decimal) or not self.recipe_markup_threshold.is_finite() or self.recipe_markup_threshold <= 1:
+            raise ConfigError("[SYS] invalid recipe_markup_threshold: must be finite and > 1")
+        for name in ("recipe_min_offers", "recipe_listings_max"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(f"[SYS] invalid {name}: must be an integer >= 1")
+        object.__setattr__(self, "recipe_parts", _check_recipe_parts(self.recipe_parts))
+        object.__setattr__(self, "recipe_adders", _check_recipe_adders(self.recipe_adders))
+        object.__setattr__(self, "desktop_delivery_terms", tuple(self.desktop_delivery_terms))
+        object.__setattr__(self, "desktop_os_optional_values", tuple(self.desktop_os_optional_values))
         object.__setattr__(self, "agency_island_tokens", tuple(self.agency_island_tokens))
         object.__setattr__(self, "agency_excluded_categories", tuple(self.agency_excluded_categories))
         try:

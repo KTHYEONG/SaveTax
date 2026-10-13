@@ -66,7 +66,8 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--out-dir", type=Path)
     screen.add_argument("--online", action="store_true")
     evidence = sub.add_parser("evidence")
-    evidence.add_argument("--lane", choices=("cross", "retail", "agency", "all"), default="cross")
+    evidence.add_argument("--lane", choices=("cross", "retail", "agency", "recipe", "all"), default="cross")
+    evidence.add_argument("--recipe-kind", choices=("desktop",), default="desktop")
     evidence.add_argument("--limit", type=int, default=50)
     evidence.add_argument("--items")
     evidence.add_argument("--batch", type=int, default=0)
@@ -422,6 +423,93 @@ def _run_agency_lane(
     return candidates_n, available_n, drafts
 
 
+def _run_recipe_lane(
+    competition: CompetitionClient,
+    raw: RawApiClient,
+    fetcher: PublicFetcher,
+    evidence: EvidenceConfig,
+    audit: AuditConfig,
+    out_dir: Path,
+    dataset: Dataset,
+    wanted: list[str] | None,
+    limit: int,
+    include_review: bool,
+    recipe_kind: str,
+) -> tuple[int, int, int]:
+    from src.savetax.danawa import DanawaProduct
+    from src.savetax.desktoprecipe import delivery_terms_ok, desktop_recipe, find_recipe_candidates
+    from src.savetax.errors import DataIntegrityError
+    from src.savetax.evidence import RejectedFact
+
+    _ = audit
+    bundles: list[EvidenceBundle] = []
+    candidates_n = 0
+    available_n = 0
+    drafts = 0
+    try:
+        found = find_recipe_candidates(dataset, evidence.desktop_category, items=wanted)
+        candidates_n = len(found)
+        states = {result.input: result.state for result in competition.lookup_items(found)} if found else {}
+        available = [item for item in found if states.get(item) is ItemState.AVAILABLE]
+        available_n = len(available)
+        event = competition.get_event()
+        today = date.today()
+        cache: dict[str, DanawaProduct | str] = {}
+        for item_id in available[:limit]:
+            try:
+                attributes = raw.get_item_attributes(item_id)
+                if attributes is None:
+                    logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, "attributes_unavailable")
+                    continue
+                recipe = desktop_recipe(attributes, evidence)
+                if isinstance(recipe, str):
+                    logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
+                    continue
+                detail = competition.get_item(item_id)
+                bad_contracts = {
+                    contract_no
+                    for contract_no in {fact.contract_no for fact in detail.facts}
+                    if not delivery_terms_ok(dataset, raw, item_id, contract_no, evidence.desktop_delivery_terms, evidence.recipe_listings_max)
+                }
+                terms_rejected = [RejectedFact(f.fact_id, "terms_include_installation") for f in detail.facts if f.contract_no in bad_contracts]
+                kept = [f for f in detail.facts if f.contract_no not in bad_contracts]
+                scoped = replace(detail, facts=tuple(kept))
+                from src.savetax.recipe import build_recipe_bundle, price_parts, recipe_benchmark
+
+                priced = price_parts(recipe, fetcher, evidence, today, cache)
+                if isinstance(priced, str):
+                    logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, priced)
+                    continue
+                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today)
+                if bundle is None:
+                    logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, "below_threshold")
+                    continue
+                if terms_rejected:
+                    bundle = replace(bundle, rejected=tuple(bundle.rejected) + tuple(terms_rejected))
+                bundles.append(bundle)
+                if bundle.review_required and not include_review:
+                    continue
+                body = build_draft_body(bundle, event, evidence)
+                write_draft(body, Path(out_dir) / "drafts" / "recipe" / f"{bundle.item_id}.json")
+                drafts += 1
+                benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
+                logger.info(
+                    "[EVIDENCE] item_id=%s lane=recipe kind=%s lines=%d expected_krw=%d benchmark_krw=%d",
+                    redact(item_id), recipe_kind, len(bundle.lines), bundle.expected_total_krw, benchmark,
+                )
+            except (DataIntegrityError, ApiError) as exc:
+                logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, redact(str(exc)))
+                continue
+    finally:
+        write_bundles(bundles, Path(out_dir) / "recipe-bundles.jsonl")
+        expected = sum(b.expected_total_krw for b in bundles)
+        logger.info(
+            "[EVIDENCE] lane=recipe candidates=%d available=%d bundles=%d drafts=%d expected_krw=%d",
+            candidates_n, available_n, len(bundles), drafts, expected,
+        )
+    return candidates_n, available_n, drafts
+
+
 def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, transport: Transport | None) -> int:
     limit = args.limit
     if limit is None or limit < 1:
@@ -458,6 +546,8 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
     owned = bool(getattr(args, "owned", False))
     if owned and args.lane == "agency":
         raise ConfigError("[SYS] owned mode rejects the agency lane")
+    if owned and args.lane == "recipe":
+        raise ConfigError("[SYS] owned mode rejects the recipe lane")
     conflict_dir = Path(out_dir) / "remediation" if owned else Path(out_dir)
     try:
         with Dataset(config, audit) as dataset:
@@ -487,6 +577,11 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
                     _run_agency_lane(
                         competition, raw, fetcher, evidence, audit, Path(out_dir),
                         dataset, wanted, limit, args.include_review,
+                    )
+                if args.lane == "recipe":
+                    _run_recipe_lane(
+                        competition, raw, fetcher, evidence, audit, Path(out_dir),
+                        dataset, wanted, limit, args.include_review, args.recipe_kind,
                     )
     finally:
         _append_unit_conflicts(conflict_dir, records)
@@ -554,7 +649,7 @@ def _workflow_inputs(
 
     drafts = load_drafts(drafts_dir)
     bundles = load_bundles([evidence_dir / "cross-bundles.jsonl", evidence_dir / "retail-bundles.jsonl",
-                            evidence_dir / "agency-bundles.jsonl"], now=now)
+                            evidence_dir / "agency-bundles.jsonl", evidence_dir / "recipe-bundles.jsonl"], now=now)
     from src.savetax.workflow import matching_bundle
 
     if any(item not in bundles for item, _ in drafts):
@@ -574,7 +669,7 @@ def _single_draft(path: Path, evidence_dir: Path, now: datetime) -> list[tuple[s
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
         bundles = load_bundles([evidence_dir / "cross-bundles.jsonl", evidence_dir / "retail-bundles.jsonl",
-                                evidence_dir / "agency-bundles.jsonl"], now=now)
+                                evidence_dir / "agency-bundles.jsonl", evidence_dir / "recipe-bundles.jsonl"], now=now)
         item = body["canonical_product_id"]
         bundle = matching_bundle(body, bundles)
     except (ValueError, TypeError, KeyError, OSError):

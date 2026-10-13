@@ -20,6 +20,7 @@ from src.savetax.redaction import redact
 logger = logging.getLogger(__name__)
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,20}$")
 
 
 @dataclass(frozen=True)
@@ -404,6 +405,66 @@ class RawApiClient:
         )
         self._log(listing_id, release)
         return detail
+
+    def get_item_attributes(self, item_id: str) -> Mapping[str, str] | None:
+        """Fetch labelled attributes of one item from GET /items/{id}; None when the catalog does not serve it."""
+        if not _ITEM_ID_RE.fullmatch(item_id):
+            raise ConfigError(f"[SYS] invalid item_id: {item_id!r} must match ^[A-Za-z0-9_-]{{1,20}}$")
+        url = f"{self._config.raw_api_base_url.rstrip('/')}/items/{item_id}"
+        first = self._http.get(url, authenticated=True)
+        self._observe_rate_limit(first.headers)
+        if first.status == 200:
+            return self._parse_item_attributes(item_id, first.body)
+        if first.status == 404 and _nested_code(first.body) == "not_found":
+            self._log(item_id, None)
+            return None
+        if first.status != 429:
+            raise _nested_error(first.status, first.body)
+        self._sleep(self._throttle_wait(first.headers))
+        second = self._http.get(url, authenticated=True)
+        self._observe_rate_limit(second.headers)
+        if second.status == 200:
+            return self._parse_item_attributes(item_id, second.body)
+        if second.status == 404 and _nested_code(second.body) == "not_found":
+            self._log(item_id, None)
+            return None
+        raise _nested_error(second.status, second.body)
+
+    def _parse_item_attributes(self, item_id: str, body: bytes) -> dict[str, str]:
+        try:
+            decoded = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            raise DataIntegrityError("[DATA] malformed item: body is not JSON") from None
+        if not isinstance(decoded, dict):
+            raise DataIntegrityError("[DATA] malformed item: expected a JSON object")
+        data = decoded.get("data")
+        if not isinstance(data, dict):
+            raise DataIntegrityError("[DATA] malformed item at data: expected an object")
+        raw_id = data.get("id")
+        if not isinstance(raw_id, str) or raw_id != item_id:
+            raise DataIntegrityError("[DATA] malformed item at data.id: identity mismatch")
+        raw_attrs = data.get("attributes")
+        if raw_attrs is None:
+            return {}
+        if not isinstance(raw_attrs, list):
+            raise DataIntegrityError("[DATA] malformed item at data.attributes: expected a list")
+        out: dict[str, str] = {}
+        for entry in raw_attrs:
+            if not isinstance(entry, dict):
+                raise DataIntegrityError("[DATA] malformed item at data.attributes: expected objects")
+            name = entry.get("name")
+            value = entry.get("value")
+            if not isinstance(name, str) or not isinstance(value, str):
+                continue
+            name_s = name.strip()
+            value_s = value.strip()
+            if not name_s or not value_s:
+                continue
+            if name_s in out and out[name_s] != value_s:
+                raise DataIntegrityError("[DATA] malformed item at data.attributes: conflicting duplicate")
+            out.setdefault(name_s, value_s)
+        self._log(item_id, None)
+        return out
 
     def list_deliveries(self, listing_id: str) -> tuple[DeliveryRow, ...] | None:
         """Fetch every final delivery row of the listing's (contract, item); None when the listing is not served."""
