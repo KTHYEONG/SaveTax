@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -350,6 +350,7 @@ class SubmissionClient:
         self._http = http
         self._config = config
         self._sleep = sleep
+        self._item_by_submission: dict[str, str] = {}
 
     def _base(self) -> str:
         return self._config.competition_base_url.rstrip("/")
@@ -485,6 +486,16 @@ class SubmissionClient:
             return response
         raise AssertionError("unreachable")  # pragma: no cover
 
+    def _get_with_retry(self, url: str) -> HttpResponse:
+        """Reads are idempotent, so rate limits and 5xx are retried regardless of the error body."""
+        for attempt in range(_PREVIEW_ATTEMPTS):
+            response = self._http.get(url, authenticated=True)
+            if (response.status == 429 or response.status >= 500) and attempt < _PREVIEW_ATTEMPTS - 1:
+                self._sleep(self._config.retry_cooldown_seconds)
+                continue
+            return response
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def _send_with_retry(
         self,
         path: str,
@@ -536,17 +547,24 @@ class SubmissionClient:
         """Fetch one own submission with its lint outcome."""
         _check_sid(submission_id)
         url = f"{self._base()}/events/current/submissions/{submission_id}"
-        response = self._http.get(url, authenticated=True)
+        response = self._get_with_retry(url)
         if response.status != 200:
             raise _flat_error("competition", response.status, response.body)
         detail = _parse_detail(_decode_object(response.body, "submission"))
+        if detail.item_id is None:
+            # The detail endpoint omits the item binding; the listing is the authoritative source.
+            if submission_id not in self._item_by_submission:
+                self.list_my_submissions()
+            bound = self._item_by_submission.get(submission_id)
+            if bound is not None:
+                detail = replace(detail, item_id=bound)
         logger.info("[REPORT] lint sid=%s status=%s", redact(detail.submission_id), redact(detail.lint_status))
         return detail
 
     def list_my_submissions(self) -> list[SubmissionDetail]:
         """List own submissions with tolerant parsing."""
         url = f"{self._base()}/events/current/me/submissions"
-        response = self._http.get(url, authenticated=True)
+        response = self._get_with_retry(url)
         if response.status != 200:
             raise _flat_error("competition", response.status, response.body)
         data = _decode_object(response.body, "submissions")
@@ -557,6 +575,8 @@ class SubmissionClient:
             raise DataIntegrityError("[DATA] malformed payload at submissions: expected a list")
         details = [_parse_detail(entry) for entry in raw]
         for detail in details:
+            if detail.item_id is not None:
+                self._item_by_submission[detail.submission_id] = detail.item_id
             logger.info("[REPORT] lint sid=%s status=%s", redact(detail.submission_id), redact(detail.lint_status))
         return details
 

@@ -178,16 +178,16 @@ def test_revise_sends_if_match() -> None:
 def test_held_is_derived() -> None:
     detail = {"submission_id": "sid-1", "state": "accepted", "lint_status": "suspect", "revision": 1}
     client, _, _, _ = _harness(
-        [], [HttpResponse(status=200, headers={}, body=json.dumps(detail).encode(), elapsed_seconds=0.01)]
+        [], [HttpResponse(status=200, headers={}, body=json.dumps(detail).encode(), elapsed_seconds=0.01), _resp(200, {"submissions": []})]
     )
     assert client.get_submission("sid-1").held is True
     clean = {"submission_id": "sid-1", "state": "accepted", "lint_status": "clean", "revision": 1}
-    client2, _, _, _ = _harness([], [_resp(200, clean)])
+    client2, _, _, _ = _harness([], [_resp(200, clean), _resp(200, {"submissions": []})])
     assert client2.get_submission("sid-1").held is False
 
 
 def test_detail_tolerates_missing_optionals() -> None:
-    client, _, _, _ = _harness([], [_resp(200, {"id": "sid-1", "lint_status": "pending"})])
+    client, _, _, _ = _harness([], [_resp(200, {"id": "sid-1", "lint_status": "pending"}), _resp(200, {"submissions": []})])
     detail = client.get_submission("sid-1")
     assert detail.submission_id == "sid-1"
     assert detail.lint_lines == ()
@@ -200,7 +200,7 @@ def test_lint_hints_are_exposed() -> None:
         "lint_status": "suspect",
         "lint": {"hints": [{"code": "page_not_read", "message": "m"}]},
     }
-    client, _, _, _ = _harness([], [_resp(200, body)])
+    client, _, _, _ = _harness([], [_resp(200, body), _resp(200, {"submissions": []})])
     detail = client.get_submission("sid-1")
     assert detail.lint_hints[0].code == "page_not_read"
 
@@ -331,7 +331,7 @@ def test_lint_lines_parsed() -> None:
         "lint_status": "clean",
         "lint_lines": [{"fact_id": "f1", "verdict": "ok", "reason": "r"}],
     }
-    client, _, _, _ = _harness([], [_resp(200, body)])
+    client, _, _, _ = _harness([], [_resp(200, body), _resp(200, {"submissions": []})])
     assert client.get_submission("sid-1").lint_lines[0].fact_id == "f1"
 
 
@@ -423,7 +423,8 @@ def test_helper_branch_coverage() -> None:
         == "clean"
     )
     assert sub._parse_detail({"submission_id": "s", "lint": {"status": "clean"}, "amount_krw": "12"}).amount_krw == 12
-    client_nested = _harness([], [_resp(200, {"submission_id": "s", "lint": {"status": "clean"}})])[0]
+    nested = {"submission_id": "s", "lint": {"status": "clean"}}
+    client_nested = _harness([], [_resp(200, nested), _resp(200, {"submissions": [nested]})])[0]
     assert client_nested.get_submission("s").lint_status == "clean"
     bad_preview = {"ok": True, "next_action": "submit", "lines": []}
     client_bad, _, _, _ = _harness([_resp(200, bad_preview)])
@@ -432,10 +433,10 @@ def test_helper_branch_coverage() -> None:
 
 
 def test_read_error_paths_raise() -> None:
-    client, _, _, _ = _harness([], [_resp(500, {"code": "X", "message": "m"})])
+    client, _, _, _ = _harness([], [_resp(403, {"code": "X", "message": "m"})])
     with pytest.raises(ApiError):
         client.get_submission("sid-1")
-    client2, _, _, _ = _harness([], [_resp(500, {"code": "X", "message": "m"})])
+    client2, _, _, _ = _harness([], [_resp(403, {"code": "X", "message": "m"})])
     with pytest.raises(ApiError):
         client2.list_my_submissions()
     client3, _, _, _ = _harness([], [_resp(200, {"no": "list"})])
@@ -577,3 +578,33 @@ def test_preview_product_id_is_validated_before_io(value: object) -> None:
     with pytest.raises(ConfigError):
         client.preview({**_valid_body(), "canonical_product_id": value})
     assert calls == []
+
+
+def test_detail_without_item_is_bound_from_listing() -> None:
+    detail_payload = {"id": "s", "current_revision": 1, "lint_status": "clean"}
+    listing = {"submissions": [{"id": "s", "item_id": "item-1", "current_revision": 1, "lint_status": "clean"}]}
+    client, _, calls, _ = _harness([], [_resp(200, detail_payload), _resp(200, listing), _resp(200, detail_payload)])
+    assert client.get_submission("s").item_id == "item-1"
+    assert client.get_submission("s").item_id == "item-1"
+    assert len(calls) == 3
+
+
+def test_detail_without_item_stays_unbound_when_listing_lacks_it() -> None:
+    detail_payload = {"id": "s", "current_revision": 1, "lint_status": "clean"}
+    client, _, _, _ = _harness([], [_resp(200, detail_payload), _resp(200, {"submissions": []})])
+    assert client.get_submission("s").item_id is None
+
+
+def test_reads_retry_rate_limit_without_json_body() -> None:
+    detail = {"id": "s", "item_id": "item-1", "current_revision": 1, "lint_status": "clean"}
+    client, _, calls, sleeps = _harness([], [_resp(429, b"<html>"), _resp(502, b""), _resp(200, detail)])
+    assert client.get_submission("s").item_id == "item-1"
+    assert len(calls) == 3
+    assert sleeps == [15.0, 15.0]
+
+
+def test_reads_stop_retrying_after_three_attempts() -> None:
+    client, _, calls, _ = _harness([], [_resp(429, b"x")] * 3)
+    with pytest.raises(ApiError):
+        client.list_my_submissions()
+    assert len(calls) == 3
