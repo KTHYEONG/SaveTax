@@ -268,6 +268,66 @@ def test_unit_policy_defaults_to_annotate() -> None:
 def test_invalid_unit_policy_fails_closed() -> None:
     with pytest.raises(ConfigError, match="unit_conflict_policy"):
         _evidence(unit_conflict_policy="ignore")
+
+
+def test_series_is_the_default_policy() -> None:
+    from src.savetax.config import DEFAULT_SERIES_BLOCKS, VariantPolicy
+
+    cfg = EvidenceConfig()
+    assert cfg.variant_policy is VariantPolicy.SERIES
+    assert cfg.series_blocks == DEFAULT_SERIES_BLOCKS
+
+
+def test_inverted_series_block_is_refused() -> None:
+    from src.savetax.config import ListingSeries, SeriesBlock
+
+    with pytest.raises(ConfigError):
+        SeriesBlock("331930619_1", 1190000654, 1190000455, ListingSeries.SEISMIC)
+
+
+def test_overlapping_blocks_of_one_contract_are_refused() -> None:
+    from src.savetax.config import ListingSeries, SeriesBlock
+
+    blocks = (
+        SeriesBlock("331930619_1", 10, 20, ListingSeries.GENERAL),
+        SeriesBlock("331930619_1", 20, 30, ListingSeries.SEISMIC),
+    )
+    with pytest.raises(ConfigError):
+        _evidence(series_blocks=blocks)
+
+
+def test_same_range_in_different_contracts_is_accepted() -> None:
+    from src.savetax.config import ListingSeries, SeriesBlock
+
+    blocks = (
+        SeriesBlock("331930619_1", 10, 20, ListingSeries.GENERAL),
+        SeriesBlock("122010318_1", 10, 20, ListingSeries.GENERAL),
+    )
+    assert _evidence(series_blocks=blocks).series_blocks == blocks
+
+
+def test_default_series_table_is_internally_valid() -> None:
+    from src.savetax.config import DEFAULT_SERIES_BLOCKS
+
+    assert len(DEFAULT_SERIES_BLOCKS) == 17
+    assert _evidence(series_blocks=DEFAULT_SERIES_BLOCKS).series_blocks == DEFAULT_SERIES_BLOCKS
+
+
+def test_series_block_fields_are_validated() -> None:
+    from src.savetax.config import ListingSeries, SeriesBlock
+
+    with pytest.raises(ConfigError):
+        SeriesBlock("", 10, 20, ListingSeries.GENERAL)
+    with pytest.raises(ConfigError):
+        SeriesBlock("331930619_1", True, 20, ListingSeries.GENERAL)
+    with pytest.raises(ConfigError):
+        SeriesBlock("331930619_1", 10.5, 20, ListingSeries.GENERAL)  # type: ignore[arg-type]
+    with pytest.raises(ConfigError):
+        SeriesBlock("331930619_1", 10, 20, "weird")  # type: ignore[arg-type]
+    with pytest.raises(ConfigError):
+        _evidence(series_blocks=("not-a-block",))  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("encoded", ["", "../x", "%", "%FF", "has%20space", "A/B", "..", "K?query"])
 def test_request_key_path_requires_canonical_encoding(encoded: str) -> None:
     assert not SaveTaxConfig().allows_credential(

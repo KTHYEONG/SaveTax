@@ -75,7 +75,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--out-dir", type=Path)
     evidence.add_argument("--include-review", action="store_true")
     evidence.add_argument("--unit-policy", choices=("annotate", "reject"), default="annotate")
-    evidence.add_argument("--variant-policy", choices=("strict", "allow_low_fact", "off"), default="strict")
+    evidence.add_argument("--variant-policy", choices=("series", "strict", "allow_low_fact", "off"), default="series")
     evidence.add_argument("--owned", action="store_true")
     review = sub.add_parser("review")
     review.add_argument("--drafts-dir", type=Path)
@@ -789,6 +789,48 @@ def _read_plan_rows(plan_path: Path) -> list[dict[str, object]]:
     return rows
 
 
+def _series_unresolved(evidence_dir: Path) -> frozenset[str]:
+    import json as _json
+
+    from src.savetax.errors import DataIntegrityError
+
+    path = Path(evidence_dir) / "remediation" / "cross-bundles.jsonl"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, UnicodeError):
+        raise DataIntegrityError("[DATA] remediation bundles cannot be read") from None
+    unresolved: set[str] = set()
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            decoded = _json.loads(line)
+        except ValueError:
+            raise DataIntegrityError("[DATA] malformed remediation bundle") from None
+        if not isinstance(decoded, dict):
+            raise DataIntegrityError("[DATA] malformed remediation bundle")
+        item = decoded.get("item_id")
+        lines = decoded.get("lines")
+        rejected = decoded.get("rejected")
+        if (
+            not isinstance(item, str) or not item
+            or not isinstance(lines, list) or not isinstance(rejected, list)
+            or any(not isinstance(r, dict) or not isinstance(r.get("reason"), str) for r in rejected)
+        ):
+            raise DataIntegrityError("[DATA] malformed remediation bundle")
+        if (
+            isinstance(item, str)
+            and isinstance(lines, list)
+            and not lines
+            and isinstance(rejected, list)
+            and any(isinstance(r, dict) and r.get("reason") == "variant_unresolved" for r in rejected)
+        ):
+            unresolved.add(item)
+    return frozenset(unresolved)
+
+
 def _compute_remediation(
     environ: Mapping[str, str] | None, transport: Transport | None, write_transport: WriteTransport | None,
 ) -> tuple[
@@ -824,7 +866,7 @@ def _compute_remediation(
         except (ApiError, ConfigError, DataIntegrityError, NetworkError) as exc:
             logger.info("[SUBMIT] preview skipped item=%s reason=%s", redact(item_id), exc)
             continue
-    rows = plan_remediation(own, rebuilt, hashes, previews)
+    rows = plan_remediation(own, rebuilt, hashes, previews, _series_unresolved(evidence.evidence_dir))
     return evidence, approval, competition, submissions, ledger, now, own, rebuilt, hashes, previews, rows, plan_path
 
 

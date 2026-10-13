@@ -21,7 +21,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["ApprovalConfig", "AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
+__all__ = ["DEFAULT_SERIES_BLOCKS", "ApprovalConfig", "AuditConfig", "EvidenceConfig", "ListingSeries", "SaveTaxConfig", "Secret", "SeriesBlock", "ShopSpec", "UnitConflictPolicy", "VariantPolicy", "load_token"]
 
 
 class Secret:
@@ -261,9 +261,63 @@ class UnitConflictPolicy(enum.StrEnum):
 class VariantPolicy(enum.StrEnum):
     """How to gate benchmarks when an item carries hidden variants."""
 
+    SERIES = "series"
     STRICT = "strict"
     ALLOW_LOW_FACT = "allow_low_fact"
     OFF = "off"
+
+
+class ListingSeries(enum.StrEnum):
+    """Product line a listing belongs to inside its contract."""
+
+    GENERAL = "general"
+    SEISMIC = "seismic"
+
+
+@dataclass(frozen=True)
+class SeriesBlock:
+    """Inclusive listing-sequence range of one contract that belongs to one series."""
+
+    contract_no: str
+    first_sequence: int
+    last_sequence: int
+    series: ListingSeries
+
+    def __post_init__(self) -> None:
+        if not self.contract_no.strip():
+            raise ConfigError("[SYS] invalid series_blocks: contract_no must be non-empty")
+        if isinstance(self.first_sequence, bool) or isinstance(self.last_sequence, bool):
+            raise ConfigError("[SYS] invalid series_blocks: sequences must be integers")
+        if not isinstance(self.first_sequence, int) or not isinstance(self.last_sequence, int):
+            raise ConfigError("[SYS] invalid series_blocks: sequences must be integers")
+        if not 1 <= self.first_sequence <= self.last_sequence:
+            raise ConfigError("[SYS] invalid series_blocks: need 1 <= first_sequence <= last_sequence")
+        try:
+            object.__setattr__(self, "series", ListingSeries(self.series))
+        except ValueError:
+            raise ConfigError("[SYS] invalid series_blocks: unknown series") from None
+
+
+# Contract spec sheets and listing layout, 2026-10-13.
+DEFAULT_SERIES_BLOCKS: tuple[SeriesBlock, ...] = (
+    SeriesBlock("122010318_1", 1070000272, 1070000660, ListingSeries.GENERAL),
+    SeriesBlock("122010318_1", 1070000673, 1070001037, ListingSeries.SEISMIC),
+    SeriesBlock("331930619_1", 1190000234, 1190000449, ListingSeries.GENERAL),
+    SeriesBlock("331930619_1", 1190000455, 1190000654, ListingSeries.SEISMIC),
+    SeriesBlock("331930619_1", 1190000655, 1190000694, ListingSeries.GENERAL),
+    SeriesBlock("331930619_1", 1190000695, 1190000744, ListingSeries.SEISMIC),
+    SeriesBlock("231732062_1", 1230000327, 1230000675, ListingSeries.GENERAL),
+    SeriesBlock("231732062_1", 1230000788, 1230000877, ListingSeries.GENERAL),
+    SeriesBlock("231732062_1", 1230000878, 1230000942, ListingSeries.SEISMIC),
+    SeriesBlock("381730406_1", 1140000082, 1140000129, ListingSeries.GENERAL),
+    SeriesBlock("381730407_1", 1140000128, 1140000285, ListingSeries.GENERAL),
+    SeriesBlock("382030583_1", 1070000306, 1070000406, ListingSeries.GENERAL),
+    SeriesBlock("382030583_1", 1070000660, 1070000675, ListingSeries.SEISMIC),
+    SeriesBlock("382030583_1", 1070000682, 1070000702, ListingSeries.GENERAL),
+    SeriesBlock("382330004_1", 1030000044, 1030000195, ListingSeries.GENERAL),
+    SeriesBlock("221730822_1", 1200000091, 1200000254, ListingSeries.GENERAL),
+    SeriesBlock("221730822_1", 1200000277, 1200000481, ListingSeries.SEISMIC),
+)
 
 
 @dataclass(frozen=True)
@@ -382,7 +436,8 @@ class EvidenceConfig:
     max_lines_per_draft: int = 500
     max_draft_bytes: int = 1_000_000
     unit_conflict_policy: UnitConflictPolicy = UnitConflictPolicy.ANNOTATE
-    variant_policy: VariantPolicy = VariantPolicy.STRICT
+    variant_policy: VariantPolicy = VariantPolicy.SERIES
+    series_blocks: tuple[SeriesBlock, ...] = DEFAULT_SERIES_BLOCKS
 
     def __post_init__(self) -> None:
         try:
@@ -392,7 +447,19 @@ class EvidenceConfig:
         try:
             object.__setattr__(self, "variant_policy", VariantPolicy(self.variant_policy))
         except ValueError:
-            raise ConfigError("[SYS] invalid variant_policy: must be strict, allow_low_fact or off") from None
+            raise ConfigError(
+                "[SYS] invalid variant_policy: must be series, strict, allow_low_fact or off"
+            ) from None
+        object.__setattr__(self, "series_blocks", tuple(self.series_blocks))
+        seen: dict[str, list[tuple[int, int]]] = {}
+        for block in self.series_blocks:
+            if not isinstance(block, SeriesBlock):
+                raise ConfigError("[SYS] invalid series_blocks: expected SeriesBlock")
+            ranges = seen.setdefault(block.contract_no, [])
+            for first, last in ranges:
+                if block.first_sequence <= last and first <= block.last_sequence:
+                    raise ConfigError("[SYS] invalid series_blocks: overlapping blocks of one contract")
+            ranges.append((block.first_sequence, block.last_sequence))
         for field_name, placeholder in _TEMPLATE_PLACEHOLDERS:
             value = getattr(self, field_name)
             _check_url(value, field_name)

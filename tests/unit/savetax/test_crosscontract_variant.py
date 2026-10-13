@@ -249,7 +249,7 @@ def _raw_map(**over: str | None) -> dict[str, ListingDetail | None]:
 
 
 def _ev(**over: Any) -> EvidenceConfig:
-    base: dict[str, Any] = {"cross_markup_threshold": Decimal("1.10")}
+    base: dict[str, Any] = {"cross_markup_threshold": Decimal("1.10"), "variant_policy": "strict"}
     base.update(over)
     return EvidenceConfig(**base)  # type: ignore[arg-type]
 

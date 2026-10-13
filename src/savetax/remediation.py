@@ -6,7 +6,7 @@ import enum
 import json
 import os
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -43,19 +43,31 @@ class RemediationRow:
 _ORDER = {RemediationAction.REVISE: 0, RemediationAction.WITHDRAW: 1, RemediationAction.KEEP: 2}
 
 
+def _has_rebuilt_lines(entry: tuple[Mapping[str, object], EvidenceBundle] | None) -> bool:
+    """Return True when the rebuilt entry carries at least one line; undeterminable counts as True."""
+    if entry is None:
+        return False
+    try:
+        return len(entry[1].lines) > 0
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def plan_remediation(
     own: Sequence[SubmissionDetail],
     rebuilt: Mapping[str, tuple[Mapping[str, object], EvidenceBundle]],
     submitted_hashes: Mapping[str, str],
     previews: Mapping[str, PreviewResult],
+    unresolved: Collection[str] = frozenset(),
 ) -> list[RemediationRow]:
     """Classify every active own submission; never raises for a single bad item."""
     import logging as _logging
 
     rows: list[RemediationRow] = []
+    unresolved_set = frozenset(unresolved)
     for detail in own:
         try:
-            row = _classify(detail, rebuilt, submitted_hashes, previews)
+            row = _classify(detail, rebuilt, submitted_hashes, previews, unresolved_set)
         except Exception as exc:  # noqa: BLE001
             _logging.getLogger(__name__).info("[SUBMIT] remediation skip reason=%s", type(exc).__name__)
             continue
@@ -70,6 +82,7 @@ def _classify(
     rebuilt: Mapping[str, tuple[Mapping[str, object], EvidenceBundle]],
     submitted_hashes: Mapping[str, str],
     previews: Mapping[str, PreviewResult],
+    unresolved: frozenset[str] = frozenset(),
 ) -> RemediationRow | None:
     if detail.state == "withdrawn":
         return None
@@ -78,6 +91,10 @@ def _classify(
         return None
     entry = rebuilt.get(item)
     old_amount = detail.amount_krw
+    if item in unresolved and not _has_rebuilt_lines(entry):
+        current = old_amount if isinstance(old_amount, int) else 0
+        return RemediationRow(item, detail.submission_id, detail.revision, RemediationAction.KEEP,
+                              old_amount, current, None, 0, ("series_unresolved",))
     if entry is None:
         return RemediationRow(item, detail.submission_id, detail.revision, RemediationAction.WITHDRAW,
                               old_amount, 0, None, 0, ("no_admissible_line",))

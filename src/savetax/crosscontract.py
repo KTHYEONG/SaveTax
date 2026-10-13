@@ -10,17 +10,19 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from src.savetax.audit import amount_lower_bound_krw
-from src.savetax.competition import ItemDetail, ItemState
-from src.savetax.config import AuditConfig, EvidenceConfig, UnitConflictPolicy, VariantPolicy
+from src.savetax.competition import Fact, ItemDetail, ItemState
+from src.savetax.config import AuditConfig, EvidenceConfig, ListingSeries, UnitConflictPolicy, VariantPolicy
 from src.savetax.dataset import Dataset
 from src.savetax.errors import ApiError, DataIntegrityError, DomainValidationError
 from src.savetax.evidence import EvidenceBundle, Lane, LineProposal, PriceEvidence, RejectedFact, make_line
 from src.savetax.publicweb import PublicFetcher, visible_text
 from src.savetax.rawapi import ListingDetail, RawApiClient
 from src.savetax.redaction import redact
+from src.savetax.series import fact_series, group_series
 from src.savetax.units import UnitRelation, compare_units, reconcile_units
 from src.savetax.variants import (
     ListingGroup,
+    VariantTier,
     benchmark_admissible,
     distinct_prices,
     fact_tier,
@@ -41,6 +43,9 @@ __all__ = [
 ]
 
 _VARIANT_SCOPE_SENTENCE = "비교 계약에 같은 물품 등재가 여러 단가로 있으면 가장 높은 단가의 등재만 비교 단가로 사용하였다."
+_SERIES_SCOPE_SENTENCE = "같은 물품식별번호가 한 계약 안에 제품 계열별로 따로 등재된 경우 등재 순번으로 계열을 구분하여 같은 계열의 등재끼리만 비교하였다."
+
+_SERIES_LABEL = {"general": "일반형", "seismic": "내진형"}
 
 _CLAIM = "납품요구 기록의 단가가 같은 물품식별번호의 다른 조달계약 단가보다 높게 나타난다."
 _COMPARISON_SCOPE = "같은 물품식별번호의 다른 조달계약 가운데 납품 조건이 같고 요청일에 유효하며 공급 지역이 포함되는 등재를 비교하였다."
@@ -112,7 +117,7 @@ class ListingPage:
 
 def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: AuditConfig) -> list[CrossCandidate]:
     """Return every item with a cheaper cross-contract listing, largest gap first."""
-    if evidence.variant_policy is VariantPolicy.OFF:
+    if evidence.variant_policy in (VariantPolicy.OFF, VariantPolicy.SERIES):
         return _find_cross_candidates_legacy(dataset, evidence, audit)
     threshold = format(audit.min_unit_price_krw, "f")
     markup = format(evidence.cross_markup_threshold, "f")
@@ -408,6 +413,51 @@ def _order_listings(dataset: Dataset, item_id: str, contract_no: str) -> list[tu
     return out
 
 
+def _series_pool(
+    candidate: CrossCandidate,
+    fact: Fact,
+    groups: dict[str, ListingGroup],
+    series: ListingSeries,
+    series_map: dict[str, dict[str, ListingSeries]],
+    lid_to_contract: dict[str, str],
+    cache: dict[str, ListingDetail | None],
+    fetched: list[ListingDetail],
+    raw: RawApiClient,
+    evidence: EvidenceConfig,
+    page_failed: set[str],
+) -> list[ListingDetail]:
+    """Fetch same-series listings of other contracts passing dataset and live checks."""
+    pool: list[ListingDetail] = []
+    for contract_no, group in groups.items():
+        if contract_no == fact.contract_no:
+            continue
+        mapping = series_map.get(contract_no, {})
+        for lid, price in group.listings:
+            if mapping.get(lid) is not series:
+                continue
+            if fact.unit_price_krw < price * evidence.cross_markup_threshold:
+                continue
+            if lid not in cache:
+                got = raw.get_listing(lid)
+                cache[lid] = got
+            got = cache[lid]
+            if got is None or got.item_id != candidate.item_id or got.listing_id != lid:
+                continue
+            if got.contract_no != lid_to_contract[lid]:
+                continue
+            if got.price_kind == "catalog_reference":
+                continue
+            if not (got.delivery_terms or "").strip() or not (got.supply_region or "").strip():
+                continue
+            if got.contract_begin is None or got.contract_end is None:
+                continue
+            if got.listing_id in page_failed:
+                continue
+            pool.append(got)
+            fetched.append(got)
+    return pool
+
+
 def build_cross_bundle(
     candidate: CrossCandidate,
     detail: ItemDetail,
@@ -453,9 +503,19 @@ def build_cross_bundle(
             redact(candidate.item_id), len(rejected),
         )
         return None
-    use_variant_gate = evidence.variant_policy is not VariantPolicy.OFF
-    rep_id_by_contract: dict[str, str] = {}
+    series_mode = evidence.variant_policy is VariantPolicy.SERIES and variant_bearing
+    use_variant_gate = evidence.variant_policy not in (VariantPolicy.OFF, VariantPolicy.SERIES)
     lid_to_contract: dict[str, str] = {}
+    series_map: dict[str, dict[str, ListingSeries]] = {}
+    series_cache: dict[str, ListingDetail | None] = {}
+    series_fetched: list[ListingDetail] = []
+    series_resolved = 0
+    if series_mode:
+        for contract_no, group in groups.items():
+            series_map[contract_no] = group_series(group, evidence.series_blocks)
+            for lid, _ in group.listings:
+                lid_to_contract[lid] = contract_no
+    rep_id_by_contract: dict[str, str] = {}
     if use_variant_gate:
         for contract_no, group in groups.items():
             if group.listings:
@@ -482,7 +542,7 @@ def build_cross_bundle(
             )
             wanted_ids = tuple(dict.fromkeys((*wanted_ids, *diagnostic_ids)))
     benchmarks: list[ListingDetail] = []
-    for listing_id in wanted_ids:
+    for listing_id in (() if series_mode else wanted_ids):
         got = raw.get_listing(listing_id)
         if got is None or got.item_id != candidate.item_id or got.listing_id != listing_id:
             continue
@@ -538,7 +598,7 @@ def build_cross_bundle(
         if fact_group is None:
             rejected.append(RejectedFact(fact.fact_id, "order_listing_not_served"))
             continue
-        tier = fact_tier(fact_group, fact.unit_price_krw)
+        tier = VariantTier.SOLE if series_mode else fact_tier(fact_group, fact.unit_price_krw)
         order_rows = _order_listings(dataset, candidate.item_id, fact.contract_no)
         if not order_rows:
             rejected.append(RejectedFact(fact.fact_id, "order_listing_not_served"))
@@ -546,13 +606,27 @@ def build_cross_bundle(
         if len(order_rows) > audit.max_condition_listings:
             rejected.append(RejectedFact(fact.fact_id, "too_many_order_listings"))
             continue
-        order_details: list[ListingDetail | None] = [raw.get_listing(lid) for lid, _ in order_rows]
+        if series_mode:
+            for lid, _ in order_rows:
+                if lid not in series_cache:
+                    series_cache[lid] = raw.get_listing(lid)
+            order_details = [series_cache[lid] for lid, _ in order_rows]
+        else:
+            order_details = [raw.get_listing(lid) for lid, _ in order_rows]
         if any(
             d is None or d.listing_id != lid or d.item_id != candidate.item_id or d.contract_no != fact.contract_no
             for (lid, _), d in zip(order_rows, order_details, strict=True)
         ):
             rejected.append(RejectedFact(fact.fact_id, "order_listing_not_served"))
             continue
+        series: ListingSeries | None = None
+        if series_mode:
+            live = {d.listing_id: d.price_krw for d in order_details if d is not None}
+            series = fact_series(fact_group, live, fact.unit_price_krw, evidence.series_blocks)
+            if series is None:
+                rejected.append(RejectedFact(fact.fact_id, "variant_unresolved"))
+                continue
+            series_resolved += 1
         assert fact.request_date is not None
         matched = [
             (lid, price)
@@ -575,7 +649,14 @@ def build_cross_bundle(
         order_terms, order_core = next(iter(pairs))
         order_region_full = next(str(d.supply_region) for d in selected if d is not None)
         price_matched = bool(matched)
-        pool = [b for b in benchmarks if b.listing_id not in page_failed]
+        if series_mode:
+            assert series is not None
+            pool = _series_pool(
+                candidate, fact, groups, series, series_map, lid_to_contract,
+                series_cache, series_fetched, raw, evidence, page_failed,
+            )
+        else:
+            pool = [b for b in benchmarks if b.listing_id not in page_failed]
         chosen: ListingDetail | None = None
         chosen_page: ListingPage | None = None
         chosen_rec = None
@@ -731,6 +812,13 @@ def build_cross_bundle(
         len(rejected),
         total,
     )
+    if series_mode:
+        logger.info(
+            "[EVIDENCE] item_id=%s series_resolved=%d series_unresolved=%d",
+            redact(candidate.item_id),
+            series_resolved,
+            sum(r.reason == "variant_unresolved" for r in rejected),
+        )
     if lines and total < evidence.min_item_expected_krw:
         return None
     if not lines and not any(r.reason in ("unit_display_conflict", "variant_unresolved") for r in rejected):
@@ -741,6 +829,8 @@ def build_cross_bundle(
         else "변형 구분 불확실로 비교 제외" if any(r.reason == "variant_unresolved" for r in rejected)
         else "단위 표기 충돌로 비교 제외"
     )
+    if series_mode:
+        release = next((b.release for b in series_fetched if b.release), "자료 접근 대기")
     notes = _REPRODUCTION_NOTES.format(version=dataset.version, release=release)
     comparison_scope = _COMPARISON_SCOPE
     if use_variant_gate and variant_bearing:
@@ -759,6 +849,17 @@ def build_cross_bundle(
                 f"등재 단가 복수: 계약 {cited_contract} 등재 {len(cited_group.listings)}건 "
                 f"({prices[0]:,f}원 ~ {prices[-1]:,f}원), 최고가 {cited[cited_contract]} 사용"
             )
+    elif series_mode:
+        comparison_scope = f"{_COMPARISON_SCOPE} {_SERIES_SCOPE_SENTENCE}"
+        cited = {}
+        for match_id in cited_ids:
+            match_contract = lid_to_contract.get(match_id)
+            if match_contract is not None:
+                cited.setdefault(match_contract, match_id)
+        for cited_contract in sorted(cited):
+            hit = series_map.get(cited_contract, {}).get(cited[cited_contract])
+            label = _SERIES_LABEL.get(hit.value if hit is not None else "", "")
+            caveats.append(f"계열 구분: 계약 {cited_contract} 등재 {cited[cited_contract]} ({label} 계열)")
     bundle = EvidenceBundle(
         item_id=candidate.item_id,
         lane=Lane.CROSS_CONTRACT,

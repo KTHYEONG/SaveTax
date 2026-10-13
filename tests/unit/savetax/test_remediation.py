@@ -178,3 +178,41 @@ def test_broken_bundle_lines_blocks_withdrawal() -> None:
 
     rows = plan_remediation([_detail()], {"11111111": (_body(), _Bad())}, {}, {})  # type: ignore[dict-item]
     assert rows[0].action is RemediationAction.KEEP
+
+
+def test_unknown_series_is_kept_not_withdrawn() -> None:
+    rows = plan_remediation([_detail()], {}, {}, {}, {"11111111"})
+    assert len(rows) == 1
+    assert rows[0].action is RemediationAction.KEEP
+    assert rows[0].reasons == ("series_unresolved",)
+    assert rows[0].new_amount_krw == 2000
+
+
+def test_resolved_series_without_a_line_is_withdrawn() -> None:
+    rows = plan_remediation([_detail()], {}, {}, {}, {"22222222"})
+    assert rows[0].action is RemediationAction.WITHDRAW
+    assert rows[0].reasons == ("no_admissible_line",)
+
+
+def test_unresolved_flag_does_not_override_a_rebuilt_body() -> None:
+    body = _body()
+    bundle = _bundle()
+    rows = plan_remediation([_detail()], {"11111111": (body, bundle)},
+                            {"11111111": body_hash(body)}, {"11111111": _preview()}, {"11111111"})
+    assert rows[0].action is RemediationAction.KEEP
+    assert rows[0].reasons == ("unchanged",)
+
+
+def test_broken_bundle_with_unresolved_flag_is_kept() -> None:
+    class _Bad:
+        @property
+        def lines(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("boom")
+
+        @property
+        def expected_total_krw(self) -> int:
+            return 0
+
+    rows = plan_remediation([_detail()], {"11111111": (_body(), _Bad())}, {}, {}, {"11111111"})  # type: ignore[dict-item]
+    assert rows[0].action is RemediationAction.KEEP
+    assert rows[0].reasons == ("preview_not_admissible",)

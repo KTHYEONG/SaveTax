@@ -11,7 +11,7 @@ import duckdb
 import pytest
 
 from src.savetax.competition import Fact, ItemDetail, ItemState
-from src.savetax.config import AuditConfig, EvidenceConfig, SaveTaxConfig
+from src.savetax.config import AuditConfig, EvidenceConfig, ListingSeries, SaveTaxConfig, SeriesBlock, VariantPolicy
 from src.savetax.crosscontract import (
     CrossCandidate,
     build_cross_bundle,
@@ -1376,3 +1376,403 @@ def test_foreign_claim_never_rebuilt(tmp_path: Path) -> None:
                                   allowed_states=frozenset({ItemState.CLAIMED_BY_ME})) is None
     finally:
         ds.close()
+
+
+_L1G = "111111111_0000000001"
+_L1S = "111111111_0000000002"
+_L2G = "222222222_0000000001"
+_L2S = "222222222_0000000002"
+
+_SERIES_BLOCKS = (
+    SeriesBlock("111111111_0", 1, 1, ListingSeries.GENERAL),
+    SeriesBlock("111111111_0", 2, 2, ListingSeries.SEISMIC),
+    SeriesBlock("222222222_0", 1, 1, ListingSeries.GENERAL),
+    SeriesBlock("222222222_0", 2, 2, ListingSeries.SEISMIC),
+)
+
+_SERIES_SCOPE = "같은 물품식별번호가 한 계약 안에 제품 계열별로 따로 등재된 경우 등재 순번으로 계열을 구분하여 같은 계열의 등재끼리만 비교하였다."
+
+
+def _sev(**over: object) -> EvidenceConfig:
+    base: dict[str, object] = {
+        "variant_policy": VariantPolicy.SERIES,
+        "series_blocks": _SERIES_BLOCKS,
+        "cross_markup_threshold": Decimal("1.05"),
+    }
+    base.update(over)
+    return EvidenceConfig(**base)  # type: ignore[arg-type]
+
+
+def _spage(lid: str, price: str) -> tuple[int, str]:
+    return (
+        200,
+        f"단위 대 물품식별번호 11111111 계약품목관리번호 {lid} "
+        f"계약 단가 {price}원 / 대 공급 업체 벤더 납품요구 없음 계약 기간 P "
+        f"납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음",
+    )
+
+
+def _sdetail(lid: str, price: str, contract: str) -> ListingDetail:
+    return _detail(lid, price=price, contract_no=contract, terms="서울", region="서울")
+
+
+def _series_setup(
+    tmp_path: Path,
+    order: tuple[str, str] = ("2508000", "2736000"),
+    bench: tuple[str, str] = ("2000000", "2400000"),
+    bench_contract: str = "222222222_0",
+    bench_ids: tuple[str, str] = (_L2G, _L2S),
+) -> tuple[Dataset, _FakeRaw]:
+    rows = [
+        _base_row(listing_id=_L1G, price=int(order[0]),
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=_L1S, price=int(order[1]), dlv_amount=5472000, dlv_qty=2),
+        _base_row(
+            listing_id=bench_ids[0], price=int(bench[0]),
+            dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+            dlv_amount=None, dlv_first_date=None, dlv_last_date=None,
+        ),
+        _base_row(
+            listing_id=bench_ids[1], price=int(bench[1]),
+            dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+            dlv_amount=None, dlv_first_date=None, dlv_last_date=None,
+        ),
+    ]
+    ds = _write_dataset(tmp_path, rows)
+    raw = _FakeRaw({
+        _L1G: _sdetail(_L1G, order[0], "111111111_0"),
+        _L1S: _sdetail(_L1S, order[1], "111111111_0"),
+        bench_ids[0]: _sdetail(bench_ids[0], bench[0], bench_contract),
+        bench_ids[1]: _sdetail(bench_ids[1], bench[1], bench_contract),
+    })
+    return ds, raw
+
+
+def _series_bundle(
+    tmp_path: Path,
+    facts: list,
+    pages: dict,
+    ds: Dataset,
+    raw: _FakeRaw,
+    evidence: EvidenceConfig | None = None,
+) -> object:
+    seen: list = []
+    fetch = _fetcher(pages, seen)
+    detail = _item_detail(facts)
+    cand = CrossCandidate("11111111", 5472000, 672000, ())
+    try:
+        return build_cross_bundle(cand, detail, ds, raw, fetch, evidence or _sev(), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+
+
+def test_series_same_series_benchmark_is_used(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    bundle = _series_bundle(tmp_path, [_fact()], {_L2S: _spage(_L2S, "2,400,000")}, ds, raw)
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2400000")
+
+
+def test_series_cheaper_other_series_listing_is_never_cited(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    bundle = _series_bundle(tmp_path, [_fact()], {_L2S: _spage(_L2S, "2,400,000")}, ds, raw)
+    assert bundle is not None
+    for line in bundle.lines:
+        assert _L2G not in line.price_evidence[0].quote
+    assert _L2G not in " ".join(bundle.caveats)
+    assert _L2G not in raw.calls
+
+
+def test_series_cheaper_seismic_listing_is_compared_with_seismic_facts(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path, bench=("2400000", "2000000"))
+    bundle = _series_bundle(tmp_path, [_fact()], {_L2S: _spage(_L2S, "2,000,000")}, ds, raw)
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2000000")
+
+
+def test_series_unmapped_fact_contract_blocks_the_fact(tmp_path: Path) -> None:
+    c3a, c3b = "333333333_0000000001", "333333333_0000000002"
+    rows = [
+        _base_row(listing_id=c3a, price=2508000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=c3b, price=2736000, dlv_amount=5472000, dlv_qty=2),
+        _base_row(listing_id=_L2G, price=2000000, dlv_key=None, dlv_lines=None,
+                  dlv_qty=None, dlv_unit=None, dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=_L2S, price=2400000, dlv_key=None, dlv_lines=None,
+                  dlv_qty=None, dlv_unit=None, dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+    ]
+    ds = _write_dataset(tmp_path, rows)
+    raw = _FakeRaw({
+        c3a: _sdetail(c3a, "2508000", "333333333_0"),
+        c3b: _sdetail(c3b, "2736000", "333333333_0"),
+        _L2G: _sdetail(_L2G, "2000000", "222222222_0"),
+        _L2S: _sdetail(_L2S, "2400000", "222222222_0"),
+    })
+    fact = _fact(contract_no="333333333_0", listing_id=c3b)
+    bundle = _series_bundle(tmp_path, [fact], {}, ds, raw)
+    assert bundle is not None
+    assert bundle.lines == ()
+    assert [r.reason for r in bundle.rejected if r.fact_id == "F1"] == ["variant_unresolved"]
+    assert _L2G not in raw.calls
+    assert _L2S not in raw.calls
+
+
+def test_series_unmapped_benchmark_contract_is_skipped(tmp_path: Path) -> None:
+    other = "444444444_0000000001"
+    other2 = "444444444_0000000002"
+    ds, raw = _series_setup(tmp_path, bench_contract="444444444_0", bench_ids=(other, other2))
+    bundle = _series_bundle(tmp_path, [_fact()], {}, ds, raw)
+    assert bundle is None
+
+
+def test_series_discounted_fact_price_blocks_the_fact(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    fact = _fact(unit_price_krw=Decimal("2600000"), comparable_amount_krw=Decimal("5200000"))
+    bundle = _series_bundle(tmp_path, [fact], {}, ds, raw)
+    assert bundle is not None
+    assert bundle.lines == ()
+    assert any(r.reason == "variant_unresolved" for r in bundle.rejected)
+    assert bundle.title == "변형 구분 불확실로 비교 제외"
+
+
+def test_series_resolution_precedes_order_condition_checks(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    raw.mapping[_L1G] = _detail(_L1G, price="2508000", contract_no="111111111_0", terms="")
+    raw.mapping[_L1S] = _detail(_L1S, price="2736000", contract_no="111111111_0", terms="")
+    fact = _fact(unit_price_krw=Decimal("2600000"), comparable_amount_krw=Decimal("5200000"))
+    bundle = _series_bundle(tmp_path, [fact], {}, ds, raw)
+    assert bundle is not None
+    assert [r.reason for r in bundle.rejected] == ["variant_unresolved"]
+    assert _L2S not in raw.calls
+
+
+def test_series_benchmark_later_used_as_order_reuses_cache(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    facts = [
+        _fact(),
+        _fact(fact_id="F2", contract_no="222222222_0", listing_id=_L2S,
+              unit_price_krw=Decimal("2400000"), comparable_amount_krw=Decimal("4800000")),
+    ]
+    bundle = _series_bundle(tmp_path, facts, {_L2S: _spage(_L2S, "2,400,000")}, ds, raw)
+    assert bundle is not None
+    assert len(bundle.lines) == 1
+    assert raw.calls.count(_L2S) == 1
+
+
+def test_series_non_variant_item_is_untouched(tmp_path: Path) -> None:
+    rows = [
+        _base_row(listing_id=_L1G, price=2736000, dlv_amount=5472000, dlv_qty=2),
+        _base_row(listing_id=_L2G, price=2508000, dlv_key=None, dlv_lines=None,
+                  dlv_qty=None, dlv_unit=None, dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+    ]
+    pages = {_L2G: _spage(_L2G, "2,508,000")}
+
+    def run(policy: object) -> object:
+        ds = _write_dataset(tmp_path, rows)
+        raw = _FakeRaw({
+            _L1G: _sdetail(_L1G, "2736000", "111111111_0"),
+            _L2G: _sdetail(_L2G, "2508000", "222222222_0"),
+        })
+        seen: list = []
+        detail = _item_detail([_fact(contract_no="111111111_0", listing_id=_L1G)])
+        cand = CrossCandidate("11111111", 5472000, 456000, (_L2G,))
+        try:
+            return build_cross_bundle(  # type: ignore[arg-type]
+                cand, detail, ds, raw, _fetcher(pages, seen),
+                EvidenceConfig(variant_policy=policy, series_blocks=(),  # type: ignore[arg-type]
+                               cross_markup_threshold=Decimal("1.05")),
+                AuditConfig(), today=_TODAY)
+        finally:
+            ds.close()
+
+    series_bundle = run(VariantPolicy.SERIES)
+    off_bundle = run(VariantPolicy.OFF)
+    assert series_bundle is not None
+    assert off_bundle is not None
+    assert series_bundle.lines == off_bundle.lines
+    assert series_bundle.title == off_bundle.title
+
+
+def test_series_benchmark_listing_is_fetched_once(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    facts = [_fact(fact_id=f"F{i}") for i in (1, 2, 3)]
+    bundle = _series_bundle(tmp_path, facts, {_L2S: _spage(_L2S, "2,400,000")}, ds, raw)
+    assert bundle is not None
+    assert len(bundle.lines) == 3
+    assert raw.calls.count(_L2S) == 1
+    assert raw.calls.count(_L1G) == 1
+    assert raw.calls.count(_L1S) == 1
+    assert "원시 API 릴리스 rtest" in bundle.reproduction_notes
+
+
+def test_series_other_series_listings_are_not_fetched(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    fact = _fact(unit_price_krw=Decimal("2508000"), comparable_amount_krw=Decimal("5016000"))
+    bundle = _series_bundle(tmp_path, [fact], {_L2G: _spage(_L2G, "2,000,000")}, ds, raw)
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2000000")
+    assert _L2S not in raw.calls
+
+
+def test_series_region_and_date_gates_still_apply(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    raw.mapping[_L2S] = _detail(_L2S, price="2400000", contract_no="222222222_0",
+                                terms="서울", region="서울", end="20250101")
+    bundle = _series_bundle(tmp_path, [_fact()], {}, ds, raw)
+    assert bundle is None
+
+
+def test_series_scope_and_caveat_describe_the_series(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path)
+    bundle = _series_bundle(tmp_path, [_fact()], {_L2S: _spage(_L2S, "2,400,000")}, ds, raw)
+    assert bundle is not None
+    assert _SERIES_SCOPE in bundle.comparison_scope
+    assert f"계열 구분: 계약 222222222_0 등재 {_L2S} (내진형 계열)" in bundle.caveats
+    assert not any("등재 단가 복수" in c for c in bundle.caveats)
+
+
+def test_strict_highest_priced_representative_still_holds(tmp_path: Path) -> None:
+    rows = [
+        _base_row(listing_id=_L1G, price=5200000, dlv_amount=10400000, dlv_qty=2),
+        _base_row(listing_id="222222222_0000000001", price=2100000, dlv_key=None, dlv_lines=None,
+                  dlv_qty=None, dlv_unit=None, dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id="222222222_0000000002", price=4510000, dlv_key=None, dlv_lines=None,
+                  dlv_qty=None, dlv_unit=None, dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+    ]
+    ds = _write_dataset(tmp_path, rows)
+    raw = _FakeRaw({
+        _L1G: _sdetail(_L1G, "5200000", "111111111_0"),
+        "222222222_0000000001": _sdetail("222222222_0000000001", "2100000", "222222222_0"),
+        "222222222_0000000002": _sdetail("222222222_0000000002", "4510000", "222222222_0"),
+    })
+    fact = _fact(contract_no="111111111_0", listing_id=_L1G,
+                 unit_price_krw=Decimal("5200000"), comparable_amount_krw=Decimal("10400000"))
+    pages = {"222222222_0000000002": _spage("222222222_0000000002", "4,510,000")}
+    seen: list = []
+    detail = _item_detail([fact])
+    cand = CrossCandidate("11111111", 10400000, 1000000, ("222222222_0000000001", "222222222_0000000002"))
+    try:
+        bundle = build_cross_bundle(  # type: ignore[arg-type]
+            cand, detail, ds, raw, _fetcher(pages, seen),
+            _evidence(variant_policy="strict", cross_markup_threshold=Decimal("1.05")),
+            AuditConfig(), today=_TODAY)
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("4510000")
+
+
+def test_series_pool_hygiene_skips_unfit_listings(tmp_path: Path) -> None:
+    good = "222222222_0000000002"
+    over = "333333333_0000000001"
+    missing = "444444444_0000000001"
+    foreign = "555555555_0000000001"
+    wronged = "666666666_0000000001"
+    catalog = "777777777_0000000001"
+    barren = "888888888_0000000001"
+    dateless = "999999999_0000000001"
+    rows = [
+        _base_row(listing_id=_L1G, price=2508000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=_L1S, price=2736000, dlv_amount=5472000, dlv_qty=2),
+        _base_row(listing_id=_L2G, price=2000000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=good, price=2300000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+    ]
+    for lid, price in ((over, 2700000), (missing, 2400000), (foreign, 2400000),
+                       (wronged, 2400000), (catalog, 2400000), (barren, 2400000), (dateless, 2400000)):
+        rows.append(
+            _base_row(listing_id=lid, price=price,
+                      dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                      dlv_amount=None, dlv_first_date=None, dlv_last_date=None)
+        )
+    ds = _write_dataset(tmp_path, rows)
+    blocks = (
+        SeriesBlock("111111111_0", 1, 1, ListingSeries.GENERAL),
+        SeriesBlock("111111111_0", 2, 2, ListingSeries.SEISMIC),
+        SeriesBlock("222222222_0", 1, 1, ListingSeries.GENERAL),
+        SeriesBlock("222222222_0", 2, 2, ListingSeries.SEISMIC),
+        SeriesBlock("333333333_0", 1, 1, ListingSeries.SEISMIC),
+        SeriesBlock("444444444_0", 1, 1, ListingSeries.SEISMIC),
+        SeriesBlock("555555555_0", 1, 1, ListingSeries.SEISMIC),
+        SeriesBlock("666666666_0", 1, 1, ListingSeries.SEISMIC),
+        SeriesBlock("777777777_0", 1, 1, ListingSeries.SEISMIC),
+        SeriesBlock("888888888_0", 1, 1, ListingSeries.SEISMIC),
+        SeriesBlock("999999999_0", 1, 1, ListingSeries.SEISMIC),
+    )
+    raw = _FakeRaw({
+        _L1G: _sdetail(_L1G, "2508000", "111111111_0"),
+        _L1S: _sdetail(_L1S, "2736000", "111111111_0"),
+        _L2G: _sdetail(_L2G, "2000000", "222222222_0"),
+        good: _sdetail(good, "2300000", "222222222_0"),
+        over: _sdetail(over, "2700000", "333333333_0"),
+        foreign: _detail(foreign, item_id="99999999", price="2400000",
+                         contract_no="555555555_0", terms="서울", region="서울"),
+        wronged: _sdetail(wronged, "2400000", "000000000_0"),
+        catalog: _detail(catalog, price="2400000", contract_no="777777777_0",
+                         terms="서울", region="서울", kind="catalog_reference"),
+        barren: _detail(barren, price="2400000", contract_no="888888888_0",
+                        terms="", region="서울"),
+        dateless: _detail(dateless, price="2400000", contract_no="999999999_0",
+                          terms="서울", region="서울", begin=None, end=None),
+    })
+    bundle = _series_bundle(
+        tmp_path, [_fact(), _fact(fact_id="F2")], {good: _spage(good, "2,300,000")}, ds, raw,
+        _sev(series_blocks=blocks),
+    )
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2300000")
+    quote = bundle.lines[0].price_evidence[0].quote
+    assert good in quote
+    for bad in (_L2G, over, missing, foreign, wronged, catalog, barren, dateless):
+        assert bad not in quote
+    assert _L2G not in raw.calls
+    assert over not in raw.calls
+    assert raw.calls.count(missing) == 1
+
+
+def test_series_failed_page_is_not_refetched_for_next_fact(tmp_path: Path) -> None:
+    failer = "222222222_0000000002"
+    good = "333333333_0000000001"
+    rows = [
+        _base_row(listing_id=_L1G, price=2508000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=_L1S, price=2736000, dlv_amount=5472000, dlv_qty=2),
+        _base_row(listing_id=_L2G, price=2000000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=failer, price=2200000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+        _base_row(listing_id=good, price=2300000,
+                  dlv_key=None, dlv_lines=None, dlv_qty=None, dlv_unit=None,
+                  dlv_amount=None, dlv_first_date=None, dlv_last_date=None),
+    ]
+    ds = _write_dataset(tmp_path, rows)
+    blocks = (
+        SeriesBlock("111111111_0", 1, 1, ListingSeries.GENERAL),
+        SeriesBlock("111111111_0", 2, 2, ListingSeries.SEISMIC),
+        SeriesBlock("222222222_0", 1, 1, ListingSeries.GENERAL),
+        SeriesBlock("222222222_0", 2, 2, ListingSeries.SEISMIC),
+        SeriesBlock("333333333_0", 1, 1, ListingSeries.SEISMIC),
+    )
+    raw = _FakeRaw({
+        _L1G: _sdetail(_L1G, "2508000", "111111111_0"),
+        _L1S: _sdetail(_L1S, "2736000", "111111111_0"),
+        _L2G: _sdetail(_L2G, "2000000", "222222222_0"),
+        failer: _sdetail(failer, "2200000", "222222222_0"),
+        good: _sdetail(good, "2300000", "333333333_0"),
+    })
+    facts = [_fact(fact_id="F1"), _fact(fact_id="F2")]
+    bundle = _series_bundle(tmp_path, facts, {good: _spage(good, "2,300,000")}, ds, raw,
+                            _sev(series_blocks=blocks))
+    assert bundle is not None
+    assert len(bundle.lines) == 2
+    assert all(line.benchmark_unit_price_krw == Decimal("2300000") for line in bundle.lines)
