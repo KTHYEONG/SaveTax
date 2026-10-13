@@ -140,3 +140,14 @@ def test_hidden_code_cannot_supply_delivery_evidence() -> None:
     page = parse_delivery_rows(f"<script>{table}</script><style>{table}</style>")
     assert page.rows == ()
     assert page.page_count == 1
+
+
+def test_bare_ten_digit_request_numbers_are_parsed() -> None:
+    html = _table(
+        [
+            ("목포시", "2026.1.27", "23,906㎡", "30,800원", "736,304,800원", "2424361985"),
+            ("기관", "2026.5.29", "7대", "1,000원", "7,000원", "242436198"),
+        ]
+    )
+    page = parse_delivery_rows(html)
+    assert [row.request_no for row in page.rows] == ["2424361985"]

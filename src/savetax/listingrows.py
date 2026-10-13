@@ -18,7 +18,8 @@ _TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
 _TD_RE = re.compile(r"<td\b[^>]*>(.*?)</td\s*>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]*>")
 _WS_RE = re.compile(r"\s+")
-_REQ_NO_RE = re.compile(r"^R\d{2}T[A-Z]\d{6,}$")
+# Older requests carry a bare 10-digit number instead of the R-prefixed form.
+_REQ_NO_RE = re.compile(r"^(?:R\d{2}T[A-Z]\d{6,}|\d{10})$")
 _DATE_RE = re.compile(r"^\s*(\d{4})\.(\d{1,2})\.(\d{1,2})\s*$")
 _NUMBER = r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
 _QTY_RE = re.compile(rf"^({_NUMBER}(?:\.[0-9]+)?)\s*([^\d\s.,+-][^\d]*)$")

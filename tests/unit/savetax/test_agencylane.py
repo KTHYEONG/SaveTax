@@ -874,3 +874,31 @@ def test_unreadable_pages_are_cached(first_status: int) -> None:
     for _ in range(2):
         assert _cite_anchor(_ITEM, _LID, benchmark, date(2026, 10, 13), EvidenceConfig(), fetcher, cache) == "page_unreadable"  # type: ignore[arg-type]
     assert fetcher.calls == ([base, base + "?dp=2"] if first_status == 200 else [base])
+
+
+def test_note_prints_scaled_prices_without_fraction_digits(tmp_path: Path) -> None:
+    base = "https://savetax.now/listing/111111111_0000000001"
+    anchor = _table_row("C시청", "2025.11.21", "8 대", "70,000원", "560,000원", "R25TA000003")
+    pages = {base: (200, f"<html><body>{_listing_head(_ITEM, _LID, '100,000')} "
+                             f"<table>{anchor}</table></body></html>")}
+    scaled = Decimal("100000.0000")
+    rows = (
+        _scaled_row(unit_price_krw=scaled, contract_unit_price_krw=scaled),
+        _scaled_row(request_no="R25TA000002", agency_name="B구청", unit_price_krw=Decimal("60000.0000"),
+                    contract_unit_price_krw=scaled, quantity=Decimal("5"), amount_krw=Decimal("300000"),
+                    request_date=date(2025, 9, 12)),
+        _scaled_row(request_no="R25TA000003", agency_name="C시청", unit_price_krw=Decimal("70000.0000"),
+                    contract_unit_price_krw=scaled, quantity=Decimal("8"), amount_krw=Decimal("560000"),
+                    request_date=date(2025, 11, 21)),
+    )
+    with _dataset(tmp_path, [_base_row()]) as dataset:
+        bundle = build_agency_bundle(_candidate(), _detail([_fact()]), dataset, _Raw({_LID: rows}),  # type: ignore[arg-type]
+                                     _Fetcher(pages), EvidenceConfig(), AuditConfig(),  # type: ignore[arg-type]
+                                     today=date(2026, 10, 13))
+    assert bundle is not None
+    (evidence,) = bundle.lines[0].price_evidence
+    assert evidence.note is not None
+    assert "계약단가 100,000원" in evidence.note
+    assert "60,000원" in evidence.note
+    assert "70,000원" in evidence.note
+    assert ".0" not in evidence.note

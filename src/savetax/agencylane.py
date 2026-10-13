@@ -285,6 +285,13 @@ def _format_decimal(value: Decimal) -> str:
     return text or "0"
 
 
+def _format_won(value: Decimal) -> str:
+    text = format(value, ",f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _cut_agency(name: str) -> str:
     return name[:40]
 
@@ -500,11 +507,11 @@ def _price_evidence(
         unit = row.unit or ""
         return (
             f"{row.request_date.isoformat()} {_cut_agency(row.agency_name)} "
-            f"{qty}{unit} {row.unit_price_krw:,}원 {row.request_no}"
+            f"{qty}{unit} {_format_won(row.unit_price_krw)}원 {row.request_no}"
         )
 
     note = (
-        f"같은 계약·같은 계약단가 {cup:,}원의 다른 기관 납품요구. "
+        f"같은 계약·같은 계약단가 {_format_won(cup)}원의 다른 기관 납품요구. "
         f"이전: {_seg(benchmark.before)} / 이후: {_seg(benchmark.after)} / "
         f"이 단가 이하 기관 {benchmark.supporter_agencies}곳"
     )

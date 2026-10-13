@@ -601,6 +601,21 @@ def _series_pool(
     return pool
 
 
+def _order_contract_price(fact: Fact, rows: Sequence[DeliveryRow] | None) -> Decimal | None:
+    """Return the contract unit price on the fact's own delivery row, or None when the row cannot be tied to it."""
+    for row in rows or ():
+        if (row.request_no, row.line_no) != (fact.request_no, fact.line_no):
+            continue
+        if (
+            row.unit_price_krw != fact.unit_price_krw
+            or row.quantity != fact.quantity
+            or row.request_date != fact.request_date
+        ):
+            return None
+        return row.contract_unit_price_krw
+    return None
+
+
 def build_cross_bundle(
     candidate: CrossCandidate,
     detail: ItemDetail,
@@ -781,6 +796,12 @@ def build_cross_bundle(
         if series_mode:
             live = {d.listing_id: d.price_krw for d in order_details if d is not None}
             series = fact_series(fact_group, live, fact.unit_price_krw, evidence.series_blocks)
+            if series is None:
+                # A discounted order no longer equals any listing price; its own row keeps the contract price.
+                first = next(d for d in order_details if d is not None)
+                ordered_at = _order_contract_price(fact, _rows_for(first))
+                if ordered_at is not None:
+                    series = fact_series(fact_group, live, ordered_at, evidence.series_blocks)
             if series is None:
                 rejected.append(RejectedFact(fact.fact_id, "variant_unresolved"))
                 continue

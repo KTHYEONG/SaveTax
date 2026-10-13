@@ -23,7 +23,7 @@ from src.savetax.dataset import Dataset
 from src.savetax.errors import DataIntegrityError
 from src.savetax.http import HttpResponse
 from src.savetax.publicweb import PublicFetcher
-from src.savetax.rawapi import ListingDetail
+from src.savetax.rawapi import DeliveryRow, ListingDetail
 
 _TODAY = date(2026, 10, 13)
 _REQUEST = date(2025, 10, 12)
@@ -1551,6 +1551,45 @@ def test_series_discounted_fact_price_blocks_the_fact(tmp_path: Path) -> None:
     assert bundle.lines == ()
     assert any(r.reason == "variant_unresolved" for r in bundle.rejected)
     assert bundle.title == "변형 구분 불확실로 비교 제외"
+
+
+def _order_row(**over: Any) -> DeliveryRow:
+    base: dict[str, Any] = {
+        "request_no": "R1", "line_no": "1", "request_date": _REQUEST, "agency_name": "A시청", "unit": "대",
+        "quantity": Decimal("2"), "unit_price_krw": Decimal("2600000"),
+        "contract_unit_price_krw": Decimal("2736000.0000"), "amount_krw": Decimal("5200000"),
+    }
+    base.update(over)
+    return DeliveryRow(**base)
+
+
+def test_series_discounted_fact_resolves_from_its_order_row_contract_price(tmp_path: Path) -> None:
+    ds, raw = _series_setup(tmp_path, bench=("2400000", "2000000"))
+    raw.deliveries = {_L1G: (_order_row(request_no="R9"), _order_row()), _L1S: (_order_row(request_no="R9"), _order_row())}
+    fact = _fact(unit_price_krw=Decimal("2600000"), comparable_amount_krw=Decimal("5200000"))
+    bundle = _series_bundle(tmp_path, [fact], {_L2S: _spage(_L2S, "2,000,000")}, ds, raw)
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2000000")
+    assert bundle.lines[0].fact_unit_price_krw == Decimal("2600000")
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _order_row(unit_price_krw=Decimal("2500000")),
+        _order_row(quantity=Decimal("3")),
+        _order_row(request_date=date(2020, 1, 1)),
+        _order_row(contract_unit_price_krw=Decimal("2700000")),
+        _order_row(request_no="R2"),
+    ],
+)
+def test_series_order_row_that_cannot_be_tied_keeps_the_fact_blocked(tmp_path: Path, row: DeliveryRow) -> None:
+    ds, raw = _series_setup(tmp_path, bench=("2400000", "2000000"))
+    raw.deliveries = {_L1G: (row,), _L1S: (row,)}
+    fact = _fact(unit_price_krw=Decimal("2600000"), comparable_amount_krw=Decimal("5200000"))
+    bundle = _series_bundle(tmp_path, [fact], {_L2S: _spage(_L2S, "2,000,000")}, ds, raw)
+    assert bundle is not None
+    assert [r.reason for r in bundle.rejected] == ["variant_unresolved"]
 
 
 def test_series_resolution_precedes_order_condition_checks(tmp_path: Path) -> None:
