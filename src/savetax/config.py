@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 import math
 from collections.abc import Mapping
@@ -20,7 +21,7 @@ _TOKEN_PREFIX = "savetax_"  # noqa: S105
 _FORBIDDEN_VALUE_CHARS = frozenset("\"'<>")
 _ZIP_URL = "https://savetax-dataset.reform-dev-infra.workers.dev/latest/savetax-products.zip"
 
-__all__ = ["AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "load_token"]
+__all__ = ["AuditConfig", "EvidenceConfig", "SaveTaxConfig", "Secret", "ShopSpec", "UnitConflictPolicy", "load_token"]
 
 
 class Secret:
@@ -238,6 +239,13 @@ _TEMPLATE_PLACEHOLDERS: tuple[tuple[str, str], ...] = (
 _CREDENTIAL_HOSTS = frozenset({"hackathon.savetax.now", "api.savetax.now"})
 
 
+class UnitConflictPolicy(enum.StrEnum):
+    """How to handle a display-unit conflict on a listing page."""
+
+    ANNOTATE = "annotate"
+    REJECT = "reject"
+
+
 @dataclass(frozen=True)
 class EvidenceConfig:
     """Thresholds, public hosts and output paths for evidence collection."""
@@ -353,8 +361,13 @@ class EvidenceConfig:
     )
     max_lines_per_draft: int = 500
     max_draft_bytes: int = 1_000_000
+    unit_conflict_policy: UnitConflictPolicy = UnitConflictPolicy.ANNOTATE
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "unit_conflict_policy", UnitConflictPolicy(self.unit_conflict_policy))
+        except ValueError:
+            raise ConfigError("[SYS] invalid unit_conflict_policy: must be annotate or reject") from None
         for field_name, placeholder in _TEMPLATE_PLACEHOLDERS:
             value = getattr(self, field_name)
             _check_url(value, field_name)

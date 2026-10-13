@@ -1694,3 +1694,202 @@ def test_evidence_selection_from_multiple_real_candidates(tmp_path: Path, option
     else:
         assert looked_up == ["11111111", "11111112", "11111113"]
         assert detailed == ["11111111"]
+
+
+def _conflict_transport(calls: list, *, fact_unit: str = "조", raw_unit: str = "조", page_unit: str = "개") -> Any:
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        calls.append(url)
+        if url.endswith("/events/current/me"):
+            return _resp(200, _me_body("h"))
+        if url.endswith("/events/current"):
+            return _resp(
+                200,
+                {
+                    "dataset_release_id": "release-live-20261012",
+                    "ruleset_version": "rules-v1",
+                    "phase": "open",
+                    "opens_at": "2026-10-01T00:00:00Z",
+                    "closes_at": "2026-11-01T00:00:00Z",
+                    "evidence_format": "v2",
+                    "item_catalog": "catalog",
+                },
+            )
+        if "/items/lookup" in url:
+            ids = url.split("ids=")[1].split(",")
+            return _resp(200, {"items": [{"input": i, "kind": "item", "item_id": i, "state": "available"} for i in ids]})
+        if "/events/current/items/" in url and "/lookup" not in url:
+            body = _evidence_item_body("11111111")
+            body["facts"][0]["unit"] = fact_unit
+            return _resp(200, body)
+        if "/listings/111111111_0000000001" in url:
+            body = _evidence_listing_body("111111111_0000000001", "111111111_0", "2760000")
+            body["data"]["unit"] = fact_unit
+            return _resp(200, body)
+        if "/listings/222222222_0000000001" in url:
+            body = _evidence_listing_body("222222222_0000000001", "222222222_0", "2508000")
+            body["data"]["unit"] = raw_unit
+            return _resp(200, body)
+        if "savetax.now/listing/" in url:
+            html = (
+                f"<html><body>단위 {page_unit} 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+                f"계약 단가 2,508,000원 / {page_unit} 공급 업체 벤더 납품요구 없음 계약 기간 P "
+                "납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음</body></html>"
+            )
+            return HttpResponse(status=200, headers={}, body=html.encode(), elapsed_seconds=0.01)
+        raise AssertionError(f"unexpected url {url}")
+
+    return transport
+
+
+def test_unit_conflicts_are_logged(tmp_path: Path, caplog: Any) -> None:
+    import logging
+
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    out_dir = tmp_path / "ev"
+    calls: list = []
+    with caplog.at_level(logging.INFO):
+        code = main(
+            ["evidence", "--out-dir", str(out_dir), "--data-dir", str(data_dir)],
+            environ={"SAVETAX_TOKEN": TOKEN},
+            transport=_conflict_transport(calls),
+        )
+    assert code == 0
+    lines = (out_dir / "unit-conflicts.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["fact_unit"] == "조"
+    assert payload["display_unit"] == "개"
+    assert "unit_conflicts=1" in caplog.text
+    assert (out_dir / "unit-conflicts.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+def test_unit_policy_option_is_wired(tmp_path: Path) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    out_dir = tmp_path / "ev"
+    code = main(
+        ["evidence", "--out-dir", str(out_dir), "--data-dir", str(data_dir), "--unit-policy", "reject"],
+        environ={"SAVETAX_TOKEN": TOKEN},
+        transport=_conflict_transport([]),
+    )
+    assert code == 0
+    bundles = [json.loads(line) for line in (out_dir / "cross-bundles.jsonl").read_text().splitlines()]
+    assert len(bundles) == 1
+    assert bundles[0]["lines"] == []
+    assert bundles[0]["rejected"] == [{"fact_id": "F1", "reason": "unit_display_conflict"}]
+    assert not (out_dir / "drafts" / "11111111.json").exists()
+    assert len((out_dir / "unit-conflicts.jsonl").read_text().splitlines()) == 1
+
+
+def test_malformed_unit_note_cannot_hide_structured_conflicts(tmp_path: Path, monkeypatch: Any) -> None:
+    import datetime as _dt
+    from datetime import date as _date
+    from decimal import Decimal as _Decimal
+
+    import src.savetax.cli as cli
+    from src.savetax.evidence import EvidenceBundle, Lane, LineProposal, PriceEvidence
+
+    proof = PriceEvidence(
+        source_url="https://savetax.now/listing/1",
+        quote="물품식별번호 1 / savetax.now 등재 화면, 2026-10-13 확인",
+        observed_price_krw=100,
+        observed_at=_date(2026, 10, 13),
+        vat_included=True,
+        shipping_included=True,
+    )
+    line = LineProposal(
+        fact_id="F1",
+        benchmark_unit_price_krw=_Decimal("100"),
+        comparison_basis_id="b",
+        unit="조",
+        tax_basis="vat_included",
+        fact_unit_price_krw=_Decimal("200"),
+        quantity=_Decimal("1"),
+        comparable_amount_krw=_Decimal("200"),
+        request_date=_date(2025, 10, 12),
+        expected_krw=100,
+        price_evidence=(proof,),
+    )
+    bundle = EvidenceBundle(
+        item_id="1",
+        lane=Lane.CROSS_CONTRACT,
+        title="t",
+        claim="c",
+        comparison_scope="s",
+        reproduction_notes="r",
+        lines=(line,),
+        rejected=(),
+        caveats=(),
+        review_required=False,
+        generated_at=_dt.datetime(2026, 10, 13, tzinfo=_dt.UTC),
+        unit_notes=("malformed note without structure",),
+    )
+    def build(*args: Any, **kwargs: Any) -> EvidenceBundle:
+        kwargs["on_unit_conflict"]({
+            "item_id": "1", "listing_id": "1", "fact_unit": " EA ",
+            "source_unit": "ea", "display_unit": "box unit",
+            "observed_at": "2026-10-13",
+        })
+        return bundle
+
+    monkeypatch.setattr(cli, "build_cross_bundle", build)
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    out_dir = tmp_path / "out"
+    assert main(["evidence", "--data-dir", str(data_dir), "--out-dir", str(out_dir)],
+                environ={"SAVETAX_TOKEN": TOKEN}, transport=_evidence_transport([])) == 0
+    record = json.loads((out_dir / "unit-conflicts.jsonl").read_text())
+    assert record["fact_unit"] == " EA "
+    assert record["display_unit"] == "box unit"
+
+
+@pytest.mark.parametrize("policy", ["annotate", "reject"])
+def test_conflict_audit_preserves_whitespace_and_appends(tmp_path: Path, policy: str, caplog: Any) -> None:
+    data_dir = _write_dataset(tmp_path, _evidence_rows())
+    out = tmp_path / "out"
+    args = ["evidence", "--data-dir", str(data_dir), "--out-dir", str(out), "--unit-policy", policy]
+    for _ in range(2):
+        with caplog.at_level("INFO"):
+            assert main(args, environ={"SAVETAX_TOKEN": TOKEN},
+                        transport=_conflict_transport([], fact_unit="EA", raw_unit=" EA ", page_unit="box unit")) == 0
+        assert (out / "unit-conflicts.jsonl").stat().st_mode & 0o777 == 0o600
+        (out / "unit-conflicts.jsonl").chmod(0o644)
+    records = [json.loads(line) for line in (out / "unit-conflicts.jsonl").read_text().splitlines()]
+    assert len(records) == 2
+    assert records[0]["source_unit"] == " EA "
+    assert records[0]["display_unit"] == "box unit"
+    assert "unit_conflicts=1 items=1" in caplog.text
+
+
+def test_conflict_audit_survives_later_network_failure(tmp_path: Path, caplog: Any) -> None:
+    rows = _evidence_rows()
+    rows[0]["dlv_amount"] = 27600000
+    rows[0]["dlv_qty"] = 10
+    data_dir = _write_dataset(tmp_path, rows)
+    out = tmp_path / "out"
+    fallback = _conflict_transport([])
+
+    def transport(url: str, headers: Any, timeout: float) -> HttpResponse:
+        if "search.danawa.com" in url:
+            raise socket.gaierror("unreachable")
+        return fallback(url, headers, timeout)
+
+    with caplog.at_level("INFO"):
+        assert main(["evidence", "--lane", "all", "--data-dir", str(data_dir), "--out-dir", str(out)],
+                    environ={"SAVETAX_TOKEN": TOKEN}, transport=transport) == 3
+    assert len((out / "unit-conflicts.jsonl").read_text().splitlines()) == 1
+    assert "unit_conflicts=1" in caplog.text
+
+
+def test_conflict_audit_survives_bundle_threshold(tmp_path: Path, monkeypatch: Any) -> None:
+    import src.savetax.cli as cli
+    from src.savetax.config import EvidenceConfig
+
+    monkeypatch.setattr(cli, "EvidenceConfig", lambda: EvidenceConfig(min_item_expected_krw=1_000_000))
+    rows = _evidence_rows()
+    rows[0]["dlv_amount"] = 27600000
+    rows[0]["dlv_qty"] = 10
+    data_dir = _write_dataset(tmp_path, rows)
+    out = tmp_path / "out"
+    assert main(["evidence", "--data-dir", str(data_dir), "--out-dir", str(out)],
+                environ={"SAVETAX_TOKEN": TOKEN}, transport=_conflict_transport([])) == 0
+    assert (out / "cross-bundles.jsonl").read_text() == ""
+    assert len((out / "unit-conflicts.jsonl").read_text().splitlines()) == 1

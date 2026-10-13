@@ -652,7 +652,7 @@ def test_quote_contains_only_page_text(tmp_path: Path) -> None:
     for segment in segments[:-1]:
         assert any(
             segment.startswith(prefix)
-            for prefix in ("제품명", "물품식별번호", "계약품목관리번호", "계약 단가", "공급 업체", "계약 기간", "납품 조건", "공급 지역")
+            for prefix in ("제품명", "물품식별번호", "계약품목관리번호", "계약 단가", "공급 업체", "계약 기간", "납품 조건", "공급 지역", "비교 단위", "savetax.now")
         ) or segment in ("대", "개")
 
 
@@ -1065,3 +1065,260 @@ def test_wrong_raw_order_identity_cannot_supply_conditions(tmp_path: Path, field
         ds.close()
     assert bundle is None
     assert seen == []
+
+
+def _conflict_setup(tmp_path: Path, fact_unit: str, raw_unit: str, page_text: str) -> tuple[Dataset, _FakeRaw, PublicFetcher, list, ItemDetail, CrossCandidate]:
+    order = _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울", unit=fact_unit)
+    bench = _detail("222222222_0000000001", price="2508000", terms="서울", region="서울", unit=raw_unit)
+    pages = {"222222222_0000000001": (200, page_text)}
+    ds, raw, fetch, seen, _d, cand = _bundle_setup(tmp_path, {order.listing_id: order, bench.listing_id: bench}, pages)  # type: ignore[arg-type]
+    detail = _item_detail([_fact(unit=fact_unit)])
+    return ds, raw, fetch, seen, detail, cand
+
+
+_CONFLICT_PAGE = (
+    "단위 개 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+    "계약 단가 2,508,000원 / 개 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
+)
+
+
+def test_display_conflict_is_annotated_not_dropped(tmp_path: Path) -> None:
+    ds, raw, fetch, _seen, detail, cand = _conflict_setup(tmp_path, "조", "조", _CONFLICT_PAGE)  # type: ignore[misc]
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    quote = bundle.lines[0].price_evidence[0].quote
+    assert "원 / 개(" in quote
+    assert "원시 데이터·납품 사실 단위 조" in quote
+    assert "비교 단위 조" in quote
+    assert len(bundle.unit_notes) == 1
+
+
+def test_matching_labels_add_no_note(tmp_path: Path) -> None:
+    page = _CONFLICT_PAGE.replace("단위 개", "단위 조").replace("/ 개", "/ 조")
+    ds, raw, fetch, _seen, detail, cand = _conflict_setup(tmp_path, "조", "조", page)  # type: ignore[misc]
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.unit_notes == ()
+    assert "비교 단위 조" in bundle.lines[0].price_evidence[0].quote
+
+
+def test_reject_policy_drops_conflicting_benchmark(tmp_path: Path) -> None:
+    ds, raw, fetch, _seen, detail, cand = _conflict_setup(tmp_path, "조", "조", _CONFLICT_PAGE)  # type: ignore[misc]
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05"), unit_conflict_policy="reject"), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.lines == ()
+    assert bundle.rejected[0].reason == "unit_display_conflict"
+
+
+def test_reject_policy_falls_back_to_next_benchmark(tmp_path: Path) -> None:
+    order = _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울", unit="조")
+    cheap = _detail("222222222_0000000001", price="2400000", terms="서울", region="서울", unit="조")
+    nxt = _detail("222222222_0000000002", price="2508000", terms="서울", region="서울", unit="조")
+    bad = (
+        "단위 개 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+        "계약 단가 2,400,000원 / 개 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
+    )
+    good = (
+        "단위 조 물품식별번호 11111111 계약품목관리번호 222222222_0000000002 "
+        "계약 단가 2,508,000원 / 조 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
+    )
+    ds = _bundle_dataset(tmp_path)
+    raw = _FakeRaw({order.listing_id: order, cheap.listing_id: cheap, nxt.listing_id: nxt})
+    seen: list = []
+    fetch = _fetcher({"222222222_0000000001": (200, bad), "222222222_0000000002": (200, good)}, seen)
+    detail = _item_detail([_fact(unit="조")])
+    cand = CrossCandidate("11111111", 5472000, 800000, ("222222222_0000000001", "222222222_0000000002"))
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05"), unit_conflict_policy="reject"), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2508000")
+
+
+def test_data_layer_mismatch_rejected_before_page_read(tmp_path: Path) -> None:
+    page = _CONFLICT_PAGE.replace("단위 개", "단위 조").replace("/ 개", "/ 조")
+    ds, raw, fetch, seen, detail, cand = _conflict_setup(tmp_path, "조", "개", page)  # type: ignore[misc]
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is None
+    assert seen == []
+
+
+def test_case_variant_is_comparable(tmp_path: Path) -> None:
+    page = (
+        "단위 ea 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+        "계약 단가 2,508,000원 / ea 공급 업체 벤더 납품요구 없음 계약 기간 P 납품 조건 서울 납품요구 기록 없음 공급 지역 서울 인증 없음"
+    )
+    ds, raw, fetch, _seen, _d, cand = _bundle_setup(
+        tmp_path,
+        {
+            "111111111_0000000001": _detail("111111111_0000000001", contract_no="111111111_0", price="2736000", terms="서울", region="서울", unit="EA"),
+            "222222222_0000000001": _detail("222222222_0000000001", price="2508000", terms="서울", region="서울", unit="ea"),
+        },
+        {"222222222_0000000001": (200, page)},
+    )
+    detail = _item_detail([_fact(unit="EA")])
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.unit_notes == ()
+
+
+def test_self_contradicting_page_is_unparseable() -> None:
+    with pytest.raises(DataIntegrityError):
+        parse_listing_page(
+            "단위 개 물품식별번호 1 계약품목관리번호 2 계약 단가 1,000원 / 대 "
+            "공급 업체 V 계약 기간 P 납품 조건 T 납품요구 기록 없음 공급 지역 S 인증 C"
+        )
+
+
+def test_quote_respects_length_cap_with_unit_segments_kept(tmp_path: Path) -> None:
+    long_text = "V" * 5000
+    page = (
+        "단위 조 물품식별번호 11111111 계약품목관리번호 222222222_0000000001 "
+        f"계약 단가 2,508,000원 / 조 공급 업체 {long_text} 납품요구 없음 계약 기간 {long_text} 납품 조건 서울 납품요구 기록 없음 공급 지역 {long_text} 인증 없음"
+    )
+    ds, raw, fetch, _seen, detail, cand = _conflict_setup(tmp_path, "조", "조", page)  # type: ignore[misc]
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    quote = bundle.lines[0].price_evidence[0].quote
+    assert len(quote) <= 2000
+    assert "2,508,000" in quote
+    assert "비교 단위" in quote
+    assert _TODAY.isoformat() in quote
+
+
+def test_price_fields_ignore_unit_handling(tmp_path: Path) -> None:
+    ds, raw, fetch, _seen, detail, cand = _conflict_setup(tmp_path, "조", "조", _CONFLICT_PAGE)  # type: ignore[misc]
+    try:
+        bundle = build_cross_bundle(cand, detail, ds, raw, fetch, _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY)  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal("2508000")
+    assert bundle.lines[0].price_evidence[0].observed_price_krw == 2508000
+
+
+def test_quote_length_fallbacks_keep_required_segments() -> None:
+    from src.savetax.crosscontract import ListingPage, _quote
+
+    base = {
+        "listing_id": "1",
+        "item_id": "2",
+        "name": "N",
+        "unit_price_krw": 1000,
+        "unit": "조",
+        "unit_label": "조",
+        "vendor_name": "V",
+        "contract_period": "P",
+        "delivery_terms": "T",
+        "supply_region": "S",
+    }
+    short = _quote(ListingPage(**base), _TODAY, "조")
+    assert "비교 단위 조" in short
+    drop_period = _quote(
+        ListingPage(**{**base, "vendor_name": "V" * 100, "contract_period": "P" * 1900}),
+        _TODAY,
+        "조",
+    )
+    assert len(drop_period) <= 2000
+    assert "비교 단위 조" in drop_period
+    drop_region = _quote(
+        ListingPage(
+            **{
+                **base,
+                "vendor_name": "V" * 500,
+                "contract_period": "P" * 500,
+                "supply_region": "S" * 1500,
+            }
+        ),
+        _TODAY,
+        "조",
+    )
+    assert len(drop_region) <= 2000
+    assert "비교 단위 조" in drop_region
+    vendor_short = _quote(
+        ListingPage(
+            **{
+                **base,
+                "vendor_name": "V" * 1950,
+                "contract_period": "P" * 100,
+                "supply_region": "S" * 100,
+            }
+        ),
+        _TODAY,
+        "조",
+    )
+    assert len(vendor_short) <= 2000
+    assert "비교 단위 조" in vendor_short
+    extreme = _quote(
+        ListingPage(
+            **{
+                **base,
+                "name": "N" * 3000,
+                "vendor_name": "V" * 3000,
+                "contract_period": "P" * 3000,
+                "supply_region": "S" * 3000,
+            }
+        ),
+        _TODAY,
+        "조",
+    )
+    assert len(extreme) <= 2000
+    assert "비교 단위 조" in extreme
+    assert _TODAY.isoformat() in extreme
+
+
+def test_cached_conflict_rejects_each_fact_without_duplicate_fetches(tmp_path: Path) -> None:
+    ds, raw, fetch, seen, detail, cand = _conflict_setup(tmp_path, "조", "조", _CONFLICT_PAGE)
+    from dataclasses import replace
+
+    detail = replace(detail, facts=(detail.facts[0], replace(detail.facts[0], fact_id="F2")))
+    records: list[dict[str, str]] = []
+    try:
+        bundle = build_cross_bundle(
+            cand, detail, ds, raw, fetch,
+            _evidence(cross_markup_threshold=Decimal("1.05"), unit_conflict_policy="reject"),
+            AuditConfig(), today=_TODAY, on_unit_conflict=records.append,
+        )  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is not None
+    assert bundle.lines == ()
+    assert [(r.fact_id, r.reason) for r in bundle.rejected] == [
+        ("F1", "unit_display_conflict"), ("F2", "unit_display_conflict"),
+    ]
+    assert len(records) == 1
+    assert len(seen) == 1
+
+
+def test_required_unit_segments_are_never_truncated(tmp_path: Path) -> None:
+    unit = "U" * 2100
+    page = _CONFLICT_PAGE.replace("단위 개", f"단위 {unit}").replace("/ 개", f"/ {unit}")
+    ds, raw, fetch, seen, detail, cand = _conflict_setup(tmp_path, unit, unit, page)
+    try:
+        bundle = build_cross_bundle(
+            cand, detail, ds, raw, fetch,
+            _evidence(cross_markup_threshold=Decimal("1.05")), AuditConfig(), today=_TODAY,
+        )  # type: ignore[arg-type]
+    finally:
+        ds.close()
+    assert bundle is None
+    assert len(seen) == 1

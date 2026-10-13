@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
     from _typeshed import SupportsWrite
 
 from src.savetax.competition import CompetitionClient, ItemState
-from src.savetax.config import AuditConfig, EvidenceConfig, SaveTaxConfig, load_token
+from src.savetax.config import AuditConfig, EvidenceConfig, SaveTaxConfig, UnitConflictPolicy, load_token
 from src.savetax.crosscontract import build_cross_bundle, find_cross_candidates
 from src.savetax.dataset import Dataset
 from src.savetax.errors import ApiError, ConfigError, DataAccessPending, NetworkError, SaveTaxError
@@ -64,6 +65,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--data-dir", type=Path)
     evidence.add_argument("--out-dir", type=Path)
     evidence.add_argument("--include-review", action="store_true")
+    evidence.add_argument("--unit-policy", choices=("annotate", "reject"), default="annotate")
     return parser
 
 
@@ -142,6 +144,18 @@ def _run_screen(args: argparse.Namespace, environ: Mapping[str, str] | None, tra
     return 0
 
 
+def _append_unit_conflicts(out_dir: Path, records: Sequence[Mapping[str, str]]) -> None:
+    if not records:
+        return
+    path = Path(out_dir) / "unit-conflicts.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        for record in records:
+            handle.write(json.dumps(dict(record), ensure_ascii=False) + "\n")
+
+
 def _run_cross_lane(
     competition: CompetitionClient,
     raw: RawApiClient,
@@ -153,6 +167,7 @@ def _run_cross_lane(
     wanted: list[str] | None,
     limit: int,
     include_review: bool,
+    unit_conflicts: list[dict[str, str]],
 ) -> tuple[int, int, int]:
     bundles: list[EvidenceBundle] = []
     candidates_n = 0
@@ -173,10 +188,15 @@ def _run_cross_lane(
         for candidate in available[:limit]:
             try:
                 detail = competition.get_item(candidate.item_id)
-                bundle = build_cross_bundle(candidate, detail, dataset, raw, fetcher, evidence, audit, today=today)
+                bundle = build_cross_bundle(
+                    candidate, detail, dataset, raw, fetcher, evidence, audit,
+                    today=today, on_unit_conflict=unit_conflicts.append,
+                )
                 if bundle is None:
                     continue
                 bundles.append(bundle)
+                if not bundle.lines:
+                    continue
                 if bundle.review_required and not include_review:
                     continue
                 body = build_draft_body(bundle, event, evidence)
@@ -285,7 +305,12 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
         defaults,
         dataset_dir=args.data_dir if args.data_dir is not None else defaults.dataset_dir,
     )
-    evidence = evidence_defaults
+    evidence = replace(
+        evidence_defaults,
+        unit_conflict_policy=(
+            UnitConflictPolicy.REJECT if args.unit_policy == "reject" else UnitConflictPolicy.ANNOTATE
+        ),
+    )
     audit = AuditConfig()
     out_dir = args.out_dir if args.out_dir is not None else evidence.evidence_dir
     token = load_token(config, os.environ if environ is None else environ)
@@ -297,40 +322,30 @@ def _run_evidence(args: argparse.Namespace, environ: Mapping[str, str] | None, t
     if args.items is not None:
         wanted = [part.strip() for part in str(args.items).split(",") if part.strip()]
         wanted = list(dict.fromkeys(wanted))
-    with Dataset(config, audit) as dataset:
-        if args.lane in ("cross", "all"):
-            _run_cross_lane(
-                competition,
-                raw,
-                fetcher,
-                evidence,
-                audit,
-                Path(out_dir),
-                dataset,
-                wanted,
-                limit,
-                args.include_review,
-            )
-        if args.lane in ("retail", "all"):
-            handle = config.participant_handle
-            if not handle:
-                handle = competition.get_me().handle
-            _run_retail_lane(
-                competition,
-                raw,
-                fetcher,
-                evidence,
-                audit,
-                Path(out_dir),
-                dataset,
-                wanted,
-                limit,
-                args.include_review,
-                handle,
-                batch,
-                batches,
-                separate_drafts=args.lane == "all",
-            )
+    records: list[dict[str, str]] = []
+    try:
+        with Dataset(config, audit) as dataset:
+            if args.lane in ("cross", "all"):
+                _run_cross_lane(
+                    competition, raw, fetcher, evidence, audit, Path(out_dir),
+                    dataset, wanted, limit, args.include_review, records,
+                )
+            if args.lane in ("retail", "all"):
+                handle = config.participant_handle
+                if not handle:
+                    handle = competition.get_me().handle
+                _run_retail_lane(
+                    competition, raw, fetcher, evidence, audit, Path(out_dir),
+                    dataset, wanted, limit, args.include_review, handle, batch,
+                    batches, separate_drafts=args.lane == "all",
+                )
+    finally:
+        _append_unit_conflicts(Path(out_dir), records)
+        logger.info(
+            "[EVIDENCE] unit_conflicts=%d items=%d policy=%s",
+            len(records), len({record["item_id"] for record in records}),
+            evidence.unit_conflict_policy.value,
+        )
     return 0
 
 

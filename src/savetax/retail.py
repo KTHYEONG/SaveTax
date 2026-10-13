@@ -28,6 +28,7 @@ from src.savetax.publicweb import PublicFetcher
 from src.savetax.rawapi import RawApiClient
 from src.savetax.redaction import redact
 from src.savetax.shops import ShopProduct, parse_shop_product, parse_shop_search, shop_search_url
+from src.savetax.units import normalize_unit
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,14 @@ def current_benchmark(
     if Decimal(max(values)) <= Decimal(min(values)) * evidence.single_offer_stability_ratio:
         return lowest_total
     return None
+
+
+def _is_single_piece(unit: str, evidence: EvidenceConfig) -> bool:
+    """Return True when the fact unit matches the configured single-piece set."""
+    norm = normalize_unit(unit)
+    if norm is None:
+        return False
+    return any(norm == normalize_unit(allowed) for allowed in evidence.single_piece_units)
 
 
 def _core_region(value: str | None) -> str | None:
@@ -372,7 +381,7 @@ def _catalog_bundle(
         if fact.request_date is None:
             rejected.append(RejectedFact(fact.fact_id, "no_request_date"))
             continue
-        if fact.unit not in evidence.single_piece_units:
+        if not _is_single_piece(fact.unit, evidence):
             rejected.append(RejectedFact(fact.fact_id, "unit_not_single_piece"))
             continue
         if bench is None:
@@ -502,7 +511,7 @@ def _shop_product_bundle(
         if fact.request_date is None:
             rejected.append(RejectedFact(fact.fact_id, "no_request_date"))
             continue
-        if fact.unit not in evidence.single_piece_units:
+        if not _is_single_piece(fact.unit, evidence):
             rejected.append(RejectedFact(fact.fact_id, "unit_not_single_piece"))
             continue
         b_time = int(shop_product.price_krw)

@@ -116,6 +116,7 @@ class EvidenceBundle:
     caveats: tuple[str, ...]
     review_required: bool
     generated_at: datetime
+    unit_notes: tuple[str, ...] = ()
 
     @property
     def expected_total_krw(self) -> int:
@@ -283,6 +284,7 @@ def _bundle_to_json(bundle: EvidenceBundle) -> dict[str, Any]:
         "review_required": bundle.review_required,
         "generated_at": bundle.generated_at.isoformat(),
         "expected_total_krw": bundle.expected_total_krw,
+        "unit_notes": list(bundle.unit_notes),
     }
 
 

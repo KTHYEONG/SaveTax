@@ -557,6 +557,15 @@ def test_unit_not_single_piece_rejects(tmp_path: Path) -> None:
     assert bundle is None
 
 
+def test_placeholder_unit_is_not_single_piece() -> None:
+    from src.savetax.config import EvidenceConfig
+    from src.savetax.retail import _is_single_piece
+
+    assert _is_single_piece("미상", EvidenceConfig()) is False
+    assert _is_single_piece("EA", EvidenceConfig()) is True
+    assert _is_single_piece("ea", EvidenceConfig()) is True
+
+
 def test_nonscorable_and_dateless_facts_reject(tmp_path: Path) -> None:
     routes = _routes_for_product(history={_MONTH: 2800000})
     order = _detail_listing("111111111_0000000001", price="3500000")

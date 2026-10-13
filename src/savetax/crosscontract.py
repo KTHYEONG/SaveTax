@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from src.savetax.audit import amount_lower_bound_krw
 from src.savetax.competition import ItemDetail, ItemState
-from src.savetax.config import AuditConfig, EvidenceConfig
+from src.savetax.config import AuditConfig, EvidenceConfig, UnitConflictPolicy
 from src.savetax.dataset import Dataset
 from src.savetax.errors import DataIntegrityError, DomainValidationError
 from src.savetax.evidence import EvidenceBundle, Lane, LineProposal, PriceEvidence, RejectedFact, make_line
 from src.savetax.publicweb import PublicFetcher, visible_text
 from src.savetax.rawapi import ListingDetail, RawApiClient
 from src.savetax.redaction import redact
+from src.savetax.units import UnitRelation, compare_units, reconcile_units
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,9 @@ __all__ = [
 
 _CLAIM = "납품요구 기록의 단가가 같은 물품식별번호의 다른 조달계약 단가보다 높게 나타난다."
 _COMPARISON_SCOPE = "같은 물품식별번호의 다른 조달계약 가운데 납품 조건이 같고 요청일에 유효하며 공급 지역이 포함되는 등재를 비교하였다."
-_REPRODUCTION_NOTES = "데이터셋 {version}과 원시 API 릴리스 {release}의 납품요구·계약 조건을 대조하고 공개 등재 화면의 단가를 확인하였다."
+_REPRODUCTION_NOTES = (
+    "데이터셋 {version}과 원시 API 릴리스 {release}의 납품요구·계약 조건을 대조하고 공개 등재 화면의 단가를 확인하였다."
+)
 
 _LABELS = (
     "단위",
@@ -70,6 +74,7 @@ class ListingPage:
     name: str | None
     unit_price_krw: int
     unit: str | None
+    unit_label: str | None
     vendor_name: str | None
     contract_period: str | None
     delivery_terms: str | None
@@ -81,7 +86,7 @@ def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: Aud
     rows = dataset.connection.execute(
         "WITH qualifying AS ("
         "SELECT k.dlv_key, k.item_id, k.order_amount_krw, k.order_qty, b.listing_id, b.price "
-        "FROM order_keys k JOIN listings b ON k.item_id = b.item_id AND k.unit = b.unit "
+        "FROM order_keys k JOIN listings b ON k.item_id = b.item_id AND lower(trim(k.unit)) = lower(trim(b.unit)) "
         "AND k.contract_no <> b.contract_no "
         "WHERE b.price >= CAST(? AS DECIMAL(38, 6)) "
         "AND b.contract_begin <= k.last_order_date AND b.contract_end >= k.first_order_date "
@@ -93,7 +98,11 @@ def find_cross_candidates(dataset: Dataset, evidence: EvidenceConfig, audit: Aud
         "SELECT * FROM qualifying QUALIFY row_number() OVER (PARTITION BY dlv_key ORDER BY price, listing_id) = 1"
         ") SELECT c.item_id, c.order_amount_krw, c.order_qty, c.price, b.ids "
         "FROM cheapest c JOIN benchmarks b USING (item_id)",
-        [format(audit.min_unit_price_krw, "f"), format(evidence.cross_markup_threshold, "f"), evidence.max_benchmarks_per_item],
+        [
+            format(audit.min_unit_price_krw, "f"),
+            format(evidence.cross_markup_threshold, "f"),
+            evidence.max_benchmarks_per_item,
+        ],
     ).fetchall()
     benchmark_ids: dict[str, tuple[str, ...]] = {}
     gaps: dict[str, int] = {}
@@ -193,12 +202,20 @@ def parse_listing_page(text: str) -> ListingPage:
                 unit = tail or None
     if not listing_id or not item_id or unit_price is None:
         raise DataIntegrityError("[DATA] malformed listing page: missing identity or price")
+    unit_label = (values.get("단위") or "").strip() or None
+    if (
+        unit_label is not None
+        and unit is not None
+        and compare_units(unit, unit_label) is UnitRelation.INCOMPATIBLE
+    ):
+        raise DataIntegrityError("[DATA] malformed listing page: conflicting unit labels")
     return ListingPage(
         listing_id=listing_id,
         item_id=item_id,
         name=name,
         unit_price_krw=unit_price,
         unit=unit,
+        unit_label=unit_label,
         vendor_name=values.get("공급 업체"),
         contract_period=values.get("계약 기간"),
         delivery_terms=values.get("납품 조건"),
@@ -206,26 +223,65 @@ def parse_listing_page(text: str) -> ListingPage:
     )
 
 
-def _quote(page: ListingPage, today: date) -> str:
-    parts: list[str] = []
-    if page.name:
-        parts.append(page.name)
-    parts.append(f"물품식별번호 {page.item_id}")
-    parts.append(f"계약품목관리번호 {page.listing_id}")
-    if page.unit is not None:
-        parts.append(f"계약 단가 {page.unit_price_krw:,}원 / {page.unit}")
+def _quote(
+    page: ListingPage,
+    today: date,
+    fact_unit: str,
+    display_unit: str | None = None,
+    annotation: str | None = None,
+) -> str:
+    """Build the page citation with an explicit comparison-unit segment."""
+    price_unit = display_unit if annotation is not None and display_unit else page.unit
+    if price_unit is not None and annotation is not None:
+        price_seg = f"계약 단가 {page.unit_price_krw:,}원 / {price_unit}({annotation})"
+    elif page.unit is not None:
+        price_seg = f"계약 단가 {page.unit_price_krw:,}원 / {page.unit}"
     else:
-        parts.append(f"계약 단가 {page.unit_price_krw:,}원")
-    if page.vendor_name:
-        parts.append(f"공급 업체 {page.vendor_name}")
-    if page.contract_period:
-        parts.append(f"계약 기간 {page.contract_period}")
-    if page.delivery_terms:
-        parts.append(f"납품 조건 {page.delivery_terms}")
-    if page.supply_region:
-        parts.append(f"공급 지역 {page.supply_region}")
-    parts.append(f"savetax.now 등재 화면, {today.isoformat()} 확인")
-    return " / ".join(parts)
+        price_seg = f"계약 단가 {page.unit_price_krw:,}원"
+    vendor_seg = f"공급 업체 {page.vendor_name}" if page.vendor_name else None
+    period_seg = f"계약 기간 {page.contract_period}" if page.contract_period else None
+    region_seg = f"공급 지역 {page.supply_region}" if page.supply_region else None
+
+    def _assemble(include_period: bool, include_region: bool) -> str:
+        parts: list[str] = []
+        if page.name:
+            parts.append(page.name)
+        parts.append(f"물품식별번호 {page.item_id}")
+        parts.append(f"계약품목관리번호 {page.listing_id}")
+        parts.append(price_seg)
+        if vendor_seg:
+            parts.append(vendor_seg)
+        if period_seg and include_period:
+            parts.append(period_seg)
+        if page.delivery_terms:
+            parts.append(f"납품 조건 {page.delivery_terms}")
+        if region_seg and include_region:
+            parts.append(region_seg)
+        parts.append(f"비교 단위 {fact_unit}")
+        parts.append(f"savetax.now 등재 화면, {today.isoformat()} 확인")
+        return " / ".join(parts)
+
+    quote = _assemble(True, True)
+    if len(quote) <= 2000:
+        return quote
+    quote = _assemble(False, True)
+    if len(quote) <= 2000:
+        return quote
+    quote = _assemble(False, False)
+    if len(quote) <= 2000:
+        return quote
+    trimmed: list[str] = []
+    if page.name:
+        trimmed.append(page.name[:64])
+    trimmed.append(f"물품식별번호 {page.item_id}")
+    trimmed.append(f"계약품목관리번호 {page.listing_id}")
+    trimmed.append(price_seg)
+    trimmed.append(f"비교 단위 {fact_unit}")
+    trimmed.append(f"savetax.now 등재 화면, {today.isoformat()} 확인")
+    quote = " / ".join(trimmed)
+    if len(quote) > 2000:
+        raise DomainValidationError("[DATA] required quote segments exceed 2000 chars")
+    return quote
 
 
 def _order_listings(dataset: Dataset, item_id: str, contract_no: str) -> list[tuple[str, Decimal]]:
@@ -250,6 +306,7 @@ def build_cross_bundle(
     audit: AuditConfig,
     *,
     today: date,
+    on_unit_conflict: Callable[[dict[str, str]], None] | None = None,
 ) -> EvidenceBundle | None:
     """Return the bundle of admissible facts for one item, or None when the total is below the minimum."""
     if detail.state is not ItemState.AVAILABLE:
@@ -286,6 +343,9 @@ def build_cross_bundle(
     page_cache: dict[str, ListingPage] = {}
     lines: list[LineProposal] = []
     caveats: list[str] = []
+    unit_notes: list[str] = []
+    unit_note_keys: set[tuple[str, str]] = set()
+    conflict_keys: set[tuple[str, str, str]] = set()
     release = next((b.release for b in benchmarks if b.release), "자료 접근 대기")
     for fact in live_facts:
         order_rows = _order_listings(dataset, candidate.item_id, fact.contract_no)
@@ -311,12 +371,13 @@ def build_cross_bundle(
         selected_ids = [lid for lid, _ in matched] if matched else [lid for lid, _ in order_rows]
         selected = [d for (lid, _), d in zip(order_rows, order_details, strict=True) if lid in set(selected_ids)]
         if any(
-            d is None or not (d.delivery_terms or "").strip() or not _core_region(d.supply_region)
-            for d in selected
+            d is None or not (d.delivery_terms or "").strip() or not _core_region(d.supply_region) for d in selected
         ):
             rejected.append(RejectedFact(fact.fact_id, "order_listing_not_served"))
             continue
-        pairs = {(str(d.delivery_terms).strip(), _core_region(d.supply_region) or "") for d in selected if d is not None}
+        pairs = {
+            (str(d.delivery_terms).strip(), _core_region(d.supply_region) or "") for d in selected if d is not None
+        }
         if len(pairs) != 1:
             rejected.append(RejectedFact(fact.fact_id, "order_conditions_ambiguous"))
             continue
@@ -326,12 +387,14 @@ def build_cross_bundle(
         pool = [b for b in benchmarks if b.listing_id not in page_failed]
         chosen: ListingDetail | None = None
         chosen_page: ListingPage | None = None
+        chosen_rec = None
+        failure_reason = "no_admissible_benchmark"
         while pool:
             admissible: list[ListingDetail] = []
             for b in pool:
                 if b.contract_no == fact.contract_no:
                     continue
-                if (b.unit or "") != fact.unit:
+                if not reconcile_units(fact.unit, b.unit, None).comparable:
                     continue
                 assert b.contract_begin is not None
                 assert b.contract_end is not None
@@ -349,8 +412,16 @@ def build_cross_bundle(
             admissible.sort(key=lambda b: (b.price_krw, b.listing_id))
             top = admissible[0]
             if top.listing_id in page_cache:
+                cached = page_cache[top.listing_id]
+                _display = cached.unit_label if cached.unit_label is not None else cached.unit
+                _rec = reconcile_units(fact.unit, top.unit, _display)
+                if _rec.display_conflict and evidence.unit_conflict_policy == UnitConflictPolicy.REJECT:
+                    failure_reason = "unit_display_conflict"
+                    pool = [b for b in pool if b.listing_id != top.listing_id]
+                    continue
                 chosen = top
-                chosen_page = page_cache[top.listing_id]
+                chosen_page = cached
+                chosen_rec = _rec
                 break
             url = evidence.listing_page_url_template.format(listing_id=top.listing_id)
             page = fetcher.get(url)
@@ -384,26 +455,62 @@ def build_cross_bundle(
             chosen = top
             chosen_page = parsed
             page_cache[top.listing_id] = parsed
+            _display = parsed.unit_label if parsed.unit_label is not None else parsed.unit
+            _rec = reconcile_units(fact.unit, top.unit, _display)
+            if _rec.display_conflict and _display is not None:
+                conflict_key = (top.listing_id, _display, fact.unit)
+                if conflict_key not in conflict_keys:
+                    conflict_keys.add(conflict_key)
+                    if on_unit_conflict is not None:
+                        on_unit_conflict({
+                            "item_id": candidate.item_id,
+                            "listing_id": top.listing_id,
+                            "fact_unit": fact.unit,
+                            "source_unit": top.unit or "",
+                            "display_unit": _display,
+                            "observed_at": today.isoformat(),
+                        })
+            if _rec.display_conflict and evidence.unit_conflict_policy == UnitConflictPolicy.REJECT:
+                failure_reason = "unit_display_conflict"
+                chosen = None
+                chosen_page = None
+                chosen_rec = None
+                pool = [b for b in pool if b.listing_id != top.listing_id]
+                continue
+            chosen_rec = _rec
             break
         if chosen is None or chosen_page is None:
             if not any(r.fact_id == fact.fact_id for r in rejected):
-                rejected.append(RejectedFact(fact.fact_id, "no_admissible_benchmark"))
+                rejected.append(RejectedFact(fact.fact_id, failure_reason))
             continue
         url = evidence.listing_page_url_template.format(listing_id=chosen.listing_id)
-        proof = PriceEvidence(
-            source_url=url,
-            quote=_quote(chosen_page, today),
-            observed_price_krw=int(chosen.price_krw),
-            observed_at=today,
-            vat_included=True,
-            shipping_included=True,
-        )
+        _display_unit = chosen_page.unit_label if chosen_page.unit_label is not None else chosen_page.unit
+        _annotation: str | None = chosen_rec.annotation if chosen_rec is not None else None
+        if _annotation is None:
+            _probe = reconcile_units(fact.unit, chosen.unit, _display_unit)
+            _annotation = _probe.annotation
+            _display_unit = _probe.display_unit
         try:
+            proof = PriceEvidence(
+                source_url=url,
+                quote=_quote(chosen_page, today, fact.unit, _display_unit, _annotation),
+                observed_price_krw=int(chosen.price_krw),
+                observed_at=today,
+                vat_included=True,
+                shipping_included=True,
+            )
             line = make_line(fact, chosen.price_krw, [proof])
         except DomainValidationError:
             rejected.append(RejectedFact(fact.fact_id, "no_admissible_benchmark"))
             continue
         lines.append(line)
+        if _annotation is not None and _display_unit is not None:
+            _key = (chosen.listing_id, _display_unit)
+            if _key not in unit_note_keys:
+                unit_note_keys.add(_key)
+                unit_notes.append(
+                    f"단위 표기 차이: 등재 {chosen.listing_id} 화면 {_display_unit} / 데이터 {chosen.unit} / 사실 {fact.unit}"
+                )
         if (chosen.supply_region or "") != order_region_full and _core_region(chosen.supply_region) == order_core:
             caveats.append(f"공급 지역 표기 차이: 등재 {chosen.supply_region} / 주문 {order_region_full}")
         if not price_matched:
@@ -411,13 +518,17 @@ def build_cross_bundle(
     total = sum(line.expected_krw for line in lines)
     logger.info(
         "[EVIDENCE] item_id=%s lane=cross lines=%d rejected=%d expected_krw=%d",
-        redact(candidate.item_id), len(lines), len(rejected), total,
+        redact(candidate.item_id),
+        len(lines),
+        len(rejected),
+        total,
     )
-    if not lines or total < evidence.min_item_expected_krw:
+    if lines and total < evidence.min_item_expected_krw:
+        return None
+    if not lines and not any(r.reason == "unit_display_conflict" for r in rejected):
         return None
     ratios = [line.fact_unit_price_krw / line.benchmark_unit_price_krw for line in lines]
-    best = max(ratios)
-    title = f"같은 물품의 다른 계약 단가 대비 {best:.2f}배"
+    title = f"같은 물품의 다른 계약 단가 대비 {max(ratios):.2f}배" if ratios else "단위 표기 충돌로 비교 제외"
     notes = _REPRODUCTION_NOTES.format(version=dataset.version, release=release)
     bundle = EvidenceBundle(
         item_id=candidate.item_id,
@@ -431,5 +542,6 @@ def build_cross_bundle(
         caveats=tuple(caveats),
         review_required=False,
         generated_at=datetime.now(UTC),
+        unit_notes=tuple(unit_notes),
     )
     return bundle

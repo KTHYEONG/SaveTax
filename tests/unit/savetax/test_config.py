@@ -257,3 +257,14 @@ def test_evidence_unknown_shop_platform_is_rejected() -> None:
 def test_evidence_invalid_configuration_fails_closed(kw: object) -> None:
     with pytest.raises(ConfigError):
         _evidence(**kw)  # type: ignore[arg-type]
+
+
+def test_unit_policy_defaults_to_annotate() -> None:
+    from src.savetax.config import UnitConflictPolicy
+
+    assert EvidenceConfig().unit_conflict_policy is UnitConflictPolicy.ANNOTATE
+
+
+def test_invalid_unit_policy_fails_closed() -> None:
+    with pytest.raises(ConfigError, match="unit_conflict_policy"):
+        _evidence(unit_conflict_policy="ignore")
