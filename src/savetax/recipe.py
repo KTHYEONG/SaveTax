@@ -123,38 +123,39 @@ def _note(part: RecipePart, quantity: int, adders: Sequence["RecipeAdder"], prod
 
 
 def adder_page_amount(page_text: str, amount_krw: int) -> str | None:
-    """Return the visible sentence fragment that states `amount_krw` on a public page, or None when absent."""
+    """Return the visible phrase that states `amount_krw` on a public page, or None when absent."""
     from src.savetax.publicweb import visible_text
 
     figure = f"{amount_krw:,}원"
     norm = " ".join(visible_text(page_text).split())
-    if not norm:
-        return None
+    fallback: str | None = None
     pos = 0
-    while True:
-        idx = norm.find(figure, pos)
-        if idx < 0:
-            return None
-        before_ok = idx == 0 or (not norm[idx - 1].isdigit() and norm[idx - 1] != ",")
-        after = idx + len(figure)
-        after_ok = after >= len(norm) or (not norm[after].isdigit() and norm[after] != ",")
-        if before_ok and after_ok:
-            start = idx
-            end = after
-            break
+    while (idx := norm.find(figure, pos)) >= 0:
         pos = idx + 1
-    win_start = max(0, start - 150)
-    win_end = min(len(norm), end + 150)
-    if win_end - win_start > 300:
-        win_end = win_start + 300
-    window = norm[win_start:win_end]
-    rel_s = start - win_start
-    rel_e = end - win_start
-    left_sep = window.rfind("·", 0, rel_s)
-    right_sep = window.find("·", rel_e)
-    frag_start = left_sep + 1 if left_sep >= 0 else 0
-    frag_end = right_sep if right_sep >= 0 else len(window)
-    return window[frag_start:frag_end].strip() or None
+        end = idx + len(figure)
+        if (idx > 0 and (norm[idx - 1].isdigit() or norm[idx - 1] == ",")) or (
+            end < len(norm) and (norm[end].isdigit() or norm[end] == ",")
+        ):
+            continue
+        phrase = _amount_phrase(norm, idx, end)
+        # The phrase naming the published standard is the citation; other mentions sit next to unrelated prices.
+        if _ADDER_STANDARD_MARK in phrase:
+            return phrase
+        fallback = fallback or phrase
+    return fallback
+
+
+_ADDER_STANDARD_MARK = "표준품셈"
+_ADDER_PHRASE_LIMIT = 300
+
+
+def _amount_phrase(norm: str, start: int, end: int) -> str:
+    floor = max(0, start - _ADDER_PHRASE_LIMIT)
+    cuts = [cut + len(sep) for sep in (" + ", " · ", ". ") if (cut := norm.rfind(sep, floor, start)) >= 0]
+    left = max(cuts, default=floor)
+    close = norm.find(")", end, end + 60) if norm.startswith("(", end) else -1
+    right = close + 1 if close >= 0 else end
+    return norm[left:right][-_ADDER_PHRASE_LIMIT:].strip()
 
 
 def price_adders(

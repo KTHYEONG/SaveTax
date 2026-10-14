@@ -333,3 +333,20 @@ def test_adder_network_error_propagates_unchanged() -> None:
     with pytest.raises(NetworkError) as caught:
         price_adders(_recipe(adders=(_sourced_adder(),)), fetcher, _TODAY)
     assert caught.value is error
+
+
+def test_adder_phrase_prefers_the_published_standard_mention() -> None:
+    text = (
+        "기준 · 파이버마트 LD-H1800-NEW 600,000원 + 랙 설치 공식 공임 167,310원 · LD-H1800-NEW 600,000원(판매 중) + "
+        "정보통신 표준품셈 4-3-3 랙 설치 공임 167,310원(VAT 포함) · 2026.10.7 조사"
+    )
+    assert adder_page_amount(text, 167310) == "정보통신 표준품셈 4-3-3 랙 설치 공임 167,310원(VAT 포함)"
+
+
+def test_adder_phrase_drops_neighbouring_product_price() -> None:
+    text = "파이버마트 LD-H1800-NEW 600,000원 + 랙 설치 공식 공임 167,310원 767,310원"
+    assert adder_page_amount(text, 167310) == "랙 설치 공식 공임 167,310원"
+
+
+def test_adder_phrase_keeps_amount_when_parenthesis_is_unclosed() -> None:
+    assert adder_page_amount("공임 167,310원(VAT", 167310) == "공임 167,310원"
