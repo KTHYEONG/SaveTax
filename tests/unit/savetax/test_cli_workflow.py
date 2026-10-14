@@ -229,6 +229,24 @@ def test_negative_reserve_rejected() -> None:
         _reserve(argparse.Namespace(reserve=-1), 5)
 
 
+@pytest.mark.parametrize(("value", "expected"), [(None, 2), (1, 1), (11, 11)])
+def test_stop_after_suspect_override(value: int | None, expected: int) -> None:
+    import argparse
+
+    from src.savetax.cli import _stop_after_suspect
+
+    assert _stop_after_suspect(argparse.Namespace(stop_after_suspect=value), 2) == expected
+
+
+def test_zero_stop_after_suspect_rejected() -> None:
+    import argparse
+
+    from src.savetax.cli import _stop_after_suspect
+
+    with pytest.raises(ConfigError, match="stop-after-suspect"):
+        _stop_after_suspect(argparse.Namespace(stop_after_suspect=0), 2)
+
+
 def test_review_limit_validated(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.chdir(tmp_path)
     _stage(tmp_path)

@@ -98,6 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--execute", action="store_true")
     submit.add_argument("--limit", type=int)
     submit.add_argument("--reserve", type=int)
+    submit.add_argument("--stop-after-suspect", type=int)
     sub.add_parser("status")
     revise = sub.add_parser("revise")
     revise.add_argument("--item", required=True)
@@ -776,6 +777,16 @@ def _reserve(args: argparse.Namespace, default: int) -> int:
     return int(value)
 
 
+def _stop_after_suspect(args: argparse.Namespace, default: int) -> int:
+    """Consecutive suspect verdicts that stop a submit run; --stop-after-suspect overrides and must be >= 1."""
+    value = getattr(args, "stop_after_suspect", None)
+    if value is None:
+        return default
+    if value < 1:
+        raise ConfigError("[SYS] stop-after-suspect must be >= 1")
+    return int(value)
+
+
 def _run_review(
     args: argparse.Namespace, environ: Mapping[str, str] | None,
     transport: Transport | None, write_transport: WriteTransport | None,
@@ -869,7 +880,7 @@ def _run_submit(
         reserve=_reserve(args, approval.reserve_claims), execute=True, limit=args.limit, sleep=time.sleep,
         poll_seconds=approval.lint_poll_seconds, timeout_seconds=approval.lint_timeout_seconds,
         pause_seconds=approval.pause_between_submits_seconds,
-        stop_after_consecutive_suspect=approval.stop_after_consecutive_suspect,
+        stop_after_consecutive_suspect=_stop_after_suspect(args, approval.stop_after_consecutive_suspect),
         clock=_utcnow,
     )
     return code
