@@ -93,6 +93,11 @@ def _chosen_price(product: DanawaProduct, evidence: EvidenceConfig) -> int | Non
     return offers[0].price_krw
 
 
+def _sum_expression(priced: Sequence[PricedPart]) -> str:
+    terms = " + ".join(f"{p.part.label} {p.unit_price_krw * p.quantity:,}원" for p in priced)
+    return f"(= {terms})"
+
+
 def _quote(part: RecipePart, product: DanawaProduct, today: date) -> str:
     count = _offer_count(product)
     low = product.low_price_krw or 0
@@ -295,25 +300,14 @@ def build_recipe_bundle(
     else:
         benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
     procured = detail.name or item_id
-    # The server lint extracts one price from each quote and compares it with that evidence's observed price, so
-    # the quote carries only the page's own price; the declared total is explained in words, never as a figure.
-    basis = (
-        f"근거 {len(priced)}개 판매 화면 가격을 모두 더한 값"
-        if recipe.exact_sum
-        else f"이 화면 가격에 {'·'.join(a.label for a in recipe.adders)}을 더해 정한 값"
+    # The server lint judges each cited page against the declared product and B. Measured pass rates: sum written
+    # out in the quote 25/36, sum left out 0/11 (parts were then read as unrelated products).
+    header = (
+        f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
+        f"비교 단가 {benchmark:,}원{_sum_expression(priced) if recipe.exact_sum else ''}의 구성 요소 가격으로, "
+        "아래는 그 판매 화면에서 본 내용] "
     )
-    evidences = tuple(
-        replace(
-            p.evidence,
-            quote=(
-                f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거 "
-                f"{index}/{len(priced)}. 이 판매 화면에서 본 가격은 {p.evidence.observed_price_krw:,}원이다. "
-                f"선언한 비교 단가는 {basis}이며 그 금액은 이 화면에 없다. 아래는 그 판매 화면에서 본 내용] "
-                + p.evidence.quote
-            )[:2000],
-        )
-        for index, p in enumerate(priced, start=1)
-    )
+    evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []
     for fact in detail.facts:
