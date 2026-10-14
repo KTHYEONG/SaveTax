@@ -361,12 +361,13 @@ class RecipePart:
 
 @dataclass(frozen=True)
 class RecipeAdder:
-    """A fixed KRW amount added to the benchmark without a sale page, with its published basis."""
+    """A fixed KRW amount added to the benchmark, with its published basis and optional public source page."""
 
     key: str
     label: str
     amount_krw: int
     basis: str
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -412,9 +413,9 @@ DEFAULT_RECIPE_PARTS: tuple["RecipePart", ...] = (  # noqa: UP037
 DEFAULT_RECIPE_ADDERS: tuple["RecipeAdder", ...] = (  # noqa: UP037
     RecipeAdder("desktop:assembly", "조립비", 25000, "주최 측 데스크톱 판정의 조립비(https://savetax.now/405)"),
     RecipeAdder("desktop:reader", "카드리더", 5600, "주최 측 데스크톱 판정의 카드리더 가격(https://savetax.now/405)"),
-    RecipeAdder("panel:labor-terminated", "성단·설치 공임", 401649, "정보통신 표준품셈 4-3-3 패치판넬 24포트 성단·설치·결선 공임(부가세 포함), 주최 측 판정 https://savetax.now/222"),
-    RecipeAdder("panel:labor-mounted", "설치 공임", 79164, "정보통신 표준품셈 4-3-3 조립된 패치판넬 24포트 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/621"),
-    RecipeAdder("rack:labor", "랙 설치 공임", 167310, "정보통신 표준품셈 4-3-3 고정형 19인치 랙 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/176"),
+    RecipeAdder("panel:labor-terminated", "성단·설치 공임", 401649, "정보통신 표준품셈 4-3-3 패치판넬 24포트 성단·설치·결선 공임(부가세 포함), 주최 측 판정 https://savetax.now/222", "https://savetax.now/222"),
+    RecipeAdder("panel:labor-mounted", "설치 공임", 79164, "정보통신 표준품셈 4-3-3 조립된 패치판넬 24포트 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/621", "https://savetax.now/621"),
+    RecipeAdder("rack:labor", "랙 설치 공임", 167310, "정보통신 표준품셈 4-3-3 고정형 19인치 랙 설치 공임(부가세 포함), 주최 측 판정 https://savetax.now/176", "https://savetax.now/176"),
 )
 
 DEFAULT_DESKTOP_PC_REFS: tuple["DesktopPcRef", ...] = (  # noqa: UP037
@@ -455,6 +456,13 @@ def _check_recipe_adders(adders: object) -> tuple["RecipeAdder", ...]:  # noqa: 
         seen.add(adder.key)
         if isinstance(adder.amount_krw, bool) or not isinstance(adder.amount_krw, int) or adder.amount_krw <= 0:
             raise ConfigError("[SYS] invalid recipe_adders: amount_krw must be > 0")
+        if adder.source_url is not None:
+            if not isinstance(adder.source_url, str):
+                raise ConfigError("[SYS] invalid recipe_adders: source_url")
+            try:
+                _check_url(adder.source_url, "recipe_adders: source_url")
+            except ConfigError:
+                raise ConfigError("[SYS] invalid recipe_adders: source_url") from None
     return adders
 
 

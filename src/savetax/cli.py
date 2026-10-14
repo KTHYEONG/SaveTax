@@ -512,13 +512,17 @@ def _run_recipe_lane(
                 else:
                     terms_rejected = []
                     scoped = detail
-                from src.savetax.recipe import build_recipe_bundle, price_parts, recipe_benchmark
+                from src.savetax.recipe import build_recipe_bundle, price_adders, price_parts
 
                 priced = price_parts(recipe, fetcher, evidence, today, cache)
                 if isinstance(priced, str):
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, priced)
                     continue
-                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today, allowed_states=allowed)
+                cited = price_adders(recipe, fetcher, today)
+                if isinstance(cited, str):
+                    logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, cited)
+                    continue
+                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today, allowed_states=allowed, adder_evidence=cited)
                 if bundle is None:
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, "below_threshold")
                     continue
@@ -530,7 +534,7 @@ def _run_recipe_lane(
                 body = build_draft_body(bundle, event, evidence)
                 write_draft(body, draft_dir / f"{bundle.item_id}.json")
                 drafts += 1
-                benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
+                benchmark = bundle.lines[0].benchmark_unit_price_krw
                 logger.info(
                     "[EVIDENCE] item_id=%s lane=recipe kind=%s lines=%d expected_krw=%d benchmark_krw=%d",
                     redact(item_id), recipe_kind, len(bundle.lines), bundle.expected_total_krw, benchmark,
@@ -652,6 +656,12 @@ def _live_price(fetcher: PublicFetcher, url: str) -> int | None:
         page = fetcher.get(url)
         if page.status != 200 or not page.text:
             return None
+        from src.savetax.config import EvidenceConfig
+        from src.savetax.recipe import adder_page_amount
+
+        for adder in EvidenceConfig().recipe_adders:
+            if adder.source_url is not None and url == adder.source_url:
+                return adder.amount_krw if adder_page_amount(page.text, adder.amount_krw) is not None else None
         parsed = urlparse(url)
         if parsed.hostname == "savetax.now":
             listing = parse_listing_page(visible_text(page.text))

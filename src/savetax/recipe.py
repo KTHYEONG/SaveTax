@@ -21,7 +21,7 @@ from src.savetax.units import normalize_unit
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["PricedPart", "Recipe", "build_recipe_bundle", "price_parts", "recipe_benchmark"]
+__all__ = ["PricedPart", "Recipe", "adder_page_amount", "build_recipe_bundle", "price_adders", "price_parts", "recipe_benchmark"]
 
 _SENTENCES = (
     "조달 전용 모델이나 상표만 바꾼 수입품, 단종 제품처럼 같은 모델을 시중에서 구할 수 없을 때는 동급 제품의 실제 판매가와 비교합니다",
@@ -122,6 +122,82 @@ def _note(part: RecipePart, quantity: int, adders: Sequence["RecipeAdder"], prod
     return text
 
 
+def adder_page_amount(page_text: str, amount_krw: int) -> str | None:
+    """Return the visible sentence fragment that states `amount_krw` on a public page, or None when absent."""
+    from src.savetax.publicweb import visible_text
+
+    figure = f"{amount_krw:,}원"
+    norm = " ".join(visible_text(page_text).split())
+    if not norm:
+        return None
+    pos = 0
+    while True:
+        idx = norm.find(figure, pos)
+        if idx < 0:
+            return None
+        before_ok = idx == 0 or (not norm[idx - 1].isdigit() and norm[idx - 1] != ",")
+        after = idx + len(figure)
+        after_ok = after >= len(norm) or (not norm[after].isdigit() and norm[after] != ",")
+        if before_ok and after_ok:
+            start = idx
+            end = after
+            break
+        pos = idx + 1
+    win_start = max(0, start - 150)
+    win_end = min(len(norm), end + 150)
+    if win_end - win_start > 300:
+        win_end = win_start + 300
+    window = norm[win_start:win_end]
+    rel_s = start - win_start
+    rel_e = end - win_start
+    left_sep = window.rfind("·", 0, rel_s)
+    right_sep = window.find("·", rel_e)
+    frag_start = left_sep + 1 if left_sep >= 0 else 0
+    frag_end = right_sep if right_sep >= 0 else len(window)
+    return window[frag_start:frag_end].strip() or None
+
+
+def price_adders(
+    recipe: Recipe, fetcher: PublicFetcher, today: date
+) -> tuple[PriceEvidence, ...] | str:
+    """Cite every sourced adder of the recipe; returns a reason code when a page does not state its amount."""
+    cited: list[PriceEvidence] = []
+    for adder in recipe.adders:
+        if adder.source_url is None:
+            continue
+        page = fetcher.get(adder.source_url)
+        if page.status != 200 or not page.text:
+            return f"adder_page_unreadable:{adder.key}"
+        fragment = adder_page_amount(page.text, adder.amount_krw)
+        if fragment is None:
+            return f"adder_amount_missing:{adder.key}"
+        quote = (
+            f"[가산액 근거: {adder.label}. 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임] "
+            f"{fragment} / savetax.now 상세분석 화면, {today} 확인"
+        )
+        note = f"{adder.label} {adder.amount_krw:,}원 반영"
+        cited.append(
+            PriceEvidence(
+                source_url=adder.source_url,
+                quote=quote,
+                observed_price_krw=adder.amount_krw,
+                observed_at=today,
+                vat_included=True,
+                shipping_included=False,
+                note=note,
+            )
+        )
+    return tuple(cited)
+
+
+def _sourced_eligible(recipe: Recipe) -> bool:
+    return (
+        not recipe.exact_sum
+        and len(recipe.adders) > 0
+        and all(a.source_url is not None for a in recipe.adders)
+    )
+
+
 def price_parts(
     recipe: Recipe,
     fetcher: PublicFetcher,
@@ -162,7 +238,7 @@ def price_parts(
             return f"part_identity_mismatch:{part.key}"
         chosen = _chosen_price(product, evidence)
         base = product.low_price_krw if chosen is None else max(product.low_price_krw, chosen)
-        if recipe.exact_sum and base != int(product.low_price_krw):
+        if (recipe.exact_sum or _sourced_eligible(recipe)) and base != int(product.low_price_krw):
             return f"part_price_unstable:{part.key}"
         try:
             proof = PriceEvidence(
@@ -274,6 +350,53 @@ def _notes(recipe: Recipe, evidence: EvidenceConfig, today: date) -> str:
         diffs.pop()
 
 
+def _fully_sourced(recipe: Recipe, adder_evidence: Sequence[PriceEvidence]) -> bool:
+    if recipe.exact_sum or not recipe.adders:
+        return False
+    if any(a.source_url is None for a in recipe.adders):
+        return False
+    if len(adder_evidence) != len(recipe.adders):
+        return False
+    return sorted((a.source_url, a.amount_krw) for a in recipe.adders) == sorted(
+        (e.source_url, e.observed_price_krw) for e in adder_evidence
+    )
+
+
+def _sourced_sum_expression(priced: Sequence[PricedPart], adders: Sequence["RecipeAdder"]) -> str:  # noqa: UP037
+    terms = [f"{p.part.label} {p.unit_price_krw * p.quantity:,}원" for p in priced]
+    terms += [f"{a.label} {a.amount_krw:,}원" for a in adders]
+    return f"(= {' + '.join(terms)})"
+
+
+def _sourced_claim(
+    item_id: str,
+    priced: Sequence[PricedPart],
+    adders: Sequence["RecipeAdder"],  # noqa: UP037
+    benchmark: int,
+    kept: int,
+    gate_filtered: bool,
+    evidence: EvidenceConfig,
+) -> str:
+    parts_sum = sum(p.unit_price_krw * p.quantity for p in priced)
+    labels = ", ".join(p.part.label for p in priced)
+    arithmetic = f"판매가 {parts_sum:,}원"
+    for adder in adders:
+        arithmetic += f" + {adder.label} {adder.amount_krw:,}원"
+    arithmetic += f" = {benchmark:,}원"
+    comparison = (
+        f"같은 급의 시판 제품({labels}) 판매가에 주최 측이 공개한 가산액을 더한 값과 비교한 것으로 동일 모델 비교가 아니다. "
+    )
+    text = (
+        f"물품식별번호 {item_id}는 조달 전용 모델로 같은 모델의 판매 페이지가 없어 동일 모델 비교가 불가하다. "
+        f"{comparison}"
+        f"{arithmetic}. 납품요구 단가가 비교 단가의 기준 배율 이상인 납품요구 {kept}건을 비교하였다. "
+    )
+    if gate_filtered:
+        text += f"주최 측이 같은 급 판정에 쓴 가장 높은 기준가의 {_threshold_text(evidence)}배 미만인 납품요구는 넣지 않았다. "
+    text += "납품요구 기록 기준이며 검수·지급 완료나 특정 업체·기관의 위법·의도를 뜻하지 않는다."
+    return text
+
+
 def build_recipe_bundle(
     item_id: str,
     detail: ItemDetail,
@@ -284,6 +407,7 @@ def build_recipe_bundle(
     *,
     today: date,
     allowed_states: frozenset[ItemState] = frozenset({ItemState.AVAILABLE}),
+    adder_evidence: Sequence[PriceEvidence] = (),
 ) -> EvidenceBundle | None:
     """Return the recipe-lane bundle for one item, or None when no line reaches the markup threshold."""
     _ = dataset
@@ -291,25 +415,47 @@ def build_recipe_bundle(
         raise DataIntegrityError("[DATA] item detail identity mismatch")
     if detail.state not in allowed_states:
         return None
+    sourced = _fully_sourced(recipe, adder_evidence)
     if recipe.exact_sum:
         if recipe.adders or recipe.floor_krw is not None:
             raise DomainValidationError("[DATA] exact-sum recipe carries an adder or floor")
         benchmark = recipe_benchmark(priced, ())
         if any(p.unit_price_krw != p.observed_price_krw or p.observed_price_krw != p.evidence.observed_price_krw for p in priced):
             raise DomainValidationError("[DATA] exact-sum recipe prices differ from observed evidence")
+    elif sourced:
+        recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
+        benchmark = recipe_benchmark(priced, recipe.adders)
+        observed_sum = sum(p.evidence.observed_price_krw for p in priced) + sum(
+            e.observed_price_krw for e in adder_evidence
+        )
+        if benchmark != observed_sum or any(
+            p.quantity != 1 or p.unit_price_krw != p.observed_price_krw
+            or p.observed_price_krw != p.evidence.observed_price_krw for p in priced
+        ):
+            raise DomainValidationError("[DATA] sourced recipe prices differ from observed evidence")
     else:
         benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
     procured = detail.name or item_id
     # The server lint judges each cited page against the declared product and B. Measured pass rates: sum written
     # out in the quote 25/36, sum left out 0/11 (parts were then read as unrelated products).
+    if sourced:
+        expression = _sourced_sum_expression(priced, recipe.adders)
+    else:
+        expression = _sum_expression(priced) if recipe.exact_sum else ""
     header = (
         f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
-        f"비교 단가 {benchmark:,}원{_sum_expression(priced) if recipe.exact_sum else ''}의 구성 요소 가격으로, "
+        f"비교 단가 {benchmark:,}원{expression}의 구성 요소 가격으로, "
         "아래는 그 판매 화면에서 본 내용] "
     )
-    evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
+    if recipe.exact_sum:
+        evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
+    else:
+        part_evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
+        adder_evidences = tuple(replace(e, quote=(header + e.quote)[:2000]) for e in adder_evidence)
+        evidences = part_evidences + adder_evidences
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []
+    gate_base = benchmark if recipe.floor_krw is None else max(benchmark, recipe.floor_krw)
     for fact in detail.facts:
         if not fact.scorable:
             rejected.append(RejectedFact(fact.fact_id, "not_scorable"))
@@ -323,12 +469,20 @@ def build_recipe_bundle(
         if not _is_single_piece(fact.unit, evidence):
             rejected.append(RejectedFact(fact.fact_id, "unit_not_single_piece"))
             continue
-        with localcontext() as context:
-            context.prec = _arithmetic_precision(evidence.recipe_markup_threshold, Decimal(benchmark))
-            below_threshold = fact.unit_price_krw < evidence.recipe_markup_threshold * Decimal(benchmark)
-        if below_threshold:
-            rejected.append(RejectedFact(fact.fact_id, "below_threshold"))
-            continue
+        if sourced:
+            with localcontext() as context:
+                context.prec = _arithmetic_precision(evidence.recipe_markup_threshold, Decimal(gate_base))
+                below_gate = fact.unit_price_krw < evidence.recipe_markup_threshold * Decimal(gate_base)
+            if below_gate:
+                rejected.append(RejectedFact(fact.fact_id, "below_floor_gate"))
+                continue
+        else:
+            with localcontext() as context:
+                context.prec = _arithmetic_precision(evidence.recipe_markup_threshold, Decimal(benchmark))
+                below_threshold = fact.unit_price_krw < evidence.recipe_markup_threshold * Decimal(benchmark)
+            if below_threshold:
+                rejected.append(RejectedFact(fact.fact_id, "below_threshold"))
+                continue
         try:
             lines.append(make_line(fact, Decimal(benchmark), evidences))
         except DomainValidationError:
@@ -340,10 +494,14 @@ def build_recipe_bundle(
     if total < evidence.min_item_expected_krw:
         return None
     best = max(line.fact_unit_price_krw / line.benchmark_unit_price_krw for line in lines)
-    raised = recipe.floor_krw is not None and benchmark == recipe.floor_krw and (
-        sum(p.unit_price_krw * p.quantity for p in priced) + sum(a.amount_krw for a in recipe.adders) < recipe.floor_krw
-    )
-    claim = _claim(item_id, priced, recipe.adders, benchmark, recipe.floor_krw, raised, len(lines), recipe.sum_label, recipe.exact_sum)
+    if sourced:
+        gate_filtered = any(r.reason == "below_floor_gate" for r in rejected)
+        claim = _sourced_claim(item_id, priced, recipe.adders, benchmark, len(lines), gate_filtered, evidence)
+    else:
+        raised = recipe.floor_krw is not None and benchmark == recipe.floor_krw and (
+            sum(p.unit_price_krw * p.quantity for p in priced) + sum(a.amount_krw for a in recipe.adders) < recipe.floor_krw
+        )
+        claim = _claim(item_id, priced, recipe.adders, benchmark, recipe.floor_krw, raised, len(lines), recipe.sum_label, recipe.exact_sum)
     if len(claim) > 2000:
         raise DomainValidationError("[DATA] recipe claim exceeds text limit")
     bundle = EvidenceBundle(
