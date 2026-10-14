@@ -438,7 +438,7 @@ def _run_recipe_lane(
     owned: bool = False,
 ) -> tuple[int, int, int]:
     from src.savetax.desktoprecipe import delivery_terms_ok, desktop_recipe, find_recipe_candidates
-    from src.savetax.errors import DataIntegrityError
+    from src.savetax.errors import DataIntegrityError, DomainValidationError
     from src.savetax.evidence import RejectedFact
     from src.savetax.fixturerecipe import panel_recipe, rack_recipe
 
@@ -532,7 +532,7 @@ def _run_recipe_lane(
                     "[EVIDENCE] item_id=%s lane=recipe kind=%s lines=%d expected_krw=%d benchmark_krw=%d",
                     redact(item_id), recipe_kind, len(bundle.lines), bundle.expected_total_krw, benchmark,
                 )
-            except (DataIntegrityError, ApiError) as exc:
+            except (DataIntegrityError, DomainValidationError, ApiError) as exc:
                 logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, redact(str(exc)))
                 continue
     finally:

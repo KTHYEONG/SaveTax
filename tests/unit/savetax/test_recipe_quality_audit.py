@@ -147,3 +147,19 @@ def test_adder_past_citation_limit_stays_in_b_and_is_disclosed() -> None:
     assert bundle.lines[0].benchmark_unit_price_krw == 825
     assert "조립비 25원은 가격 근거 개수 한도(8개)" in bundle.claim
     assert "https://savetax.now/520" in bundle.claim
+
+
+def test_two_memory_sticks_count_twice_in_sourced_benchmark() -> None:
+    from src.savetax.evidence import PriceEvidence
+
+    base = _priced()
+    ram = replace(base, part=RecipePart("ram:16", "메모리 16GB", (base.evidence.source_url,), ("CPU",)), quantity=2)
+    adder = RecipeAdder("desktop:assembly", "조립비", 25, "basis", "https://savetax.now/520")
+    recipe = Recipe("desktop", ((ram.part, 2),), (adder,), (), (), False, (), "CPU")
+    cited = (PriceEvidence("https://savetax.now/520", "조립 25원", 25, date.today(), True, False),)
+    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="5000"),)), recipe, (ram,), _Ds(), EvidenceConfig(min_item_expected_krw=0), today=date.today(), adder_evidence=cited)  # type: ignore[arg-type]
+    assert bundle is not None
+    assert bundle.lines[0].benchmark_unit_price_krw == 225
+    note = bundle.lines[0].price_evidence[0].note
+    assert note is not None
+    assert "메모리 16GB 100원 × 2" in note  # noqa: RUF001

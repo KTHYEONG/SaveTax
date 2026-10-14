@@ -522,7 +522,12 @@ def _fully_sourced(recipe: Recipe, adder_evidence: Sequence[PriceEvidence]) -> b
 
 
 def _sourced_sum_expression(priced: Sequence[PricedPart], adders: Sequence["RecipeAdder"]) -> str:  # noqa: UP037
-    terms = [f"{p.part.label} {p.unit_price_krw * p.quantity:,}원" for p in priced]
+    terms = [
+        f"{p.part.label} {p.unit_price_krw:,}원 × {p.quantity}"  # noqa: RUF001
+        if p.quantity > 1
+        else f"{p.part.label} {p.unit_price_krw:,}원"
+        for p in priced
+    ]
     terms += [f"{a.label} {a.amount_krw:,}원" for a in adders]
     return f"(= {' + '.join(terms)})"
 
@@ -625,12 +630,14 @@ def build_recipe_bundle(
     elif sourced:
         recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
         benchmark = recipe_benchmark(priced, recipe.adders)
-        observed_sum = sum(p.evidence.observed_price_krw for p in priced) + sum(
+        observed_sum = sum(p.evidence.observed_price_krw * p.quantity for p in priced) + sum(
             e.observed_price_krw for e in adder_evidence
         )
+        declared = {part.key: quantity for part, quantity in recipe.parts}
         if benchmark != observed_sum or any(
-            p.quantity != 1 or p.unit_price_krw != p.observed_price_krw
-            or p.observed_price_krw != p.evidence.observed_price_krw for p in priced
+            p.quantity != declared.get(p.part.key)
+            or p.unit_price_krw != p.observed_price_krw or p.observed_price_krw != p.evidence.observed_price_krw
+            for p in priced
         ):
             raise DomainValidationError("[DATA] sourced recipe prices differ from observed evidence")
     else:

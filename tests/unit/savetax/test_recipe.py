@@ -307,7 +307,7 @@ def test_panel_seller_recipe_uses_cited_labour_without_floor_raise() -> None:
     assert "올림" not in bundle.claim
 
 
-def test_rack_benchmark_above_floor_kept() -> None:
+def test_rack_seller_recipe_uses_cited_labour() -> None:
     from src.savetax.evidence import PriceEvidence
     from src.savetax.fixturerecipe import rack_recipe
 
@@ -315,13 +315,16 @@ def test_rack_benchmark_above_floor_kept() -> None:
     recipe = rack_recipe("허브랙", {"외형크기(폭)": "600", "외형크기(높이)": "1200", "외형크기(깊이)": "750"}, evidence)
     assert not isinstance(recipe, str)
     part, quantity = recipe.parts[0]
-    proof = PriceEvidence(evidence.danawa_product_url_template.format(pcode=part.pcode),
-                          "허브랙 실제 판매가 600,000원", 600000, _TODAY, True, False)
-    priced = (PricedPart(part, quantity, 600000, 600000, proof),)
-    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="2000000"),)), recipe, priced, _Ds(), evidence, today=_TODAY)
+    proof = PriceEvidence(part.sources[0], "LD-SGDR750 H1200 / 판매가 490,000원", 490000, _TODAY, True, False)
+    priced = (PricedPart(part, quantity, 490000, 490000, proof),)
+    labour = tuple(
+        PriceEvidence(a.source_url, f"공임 {a.amount_krw:,}원", a.amount_krw, _TODAY, True, False)
+        for a in recipe.adders if a.source_url is not None
+    )
+    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="2000000"),)), recipe, priced, _Ds(), evidence, today=_TODAY, adder_evidence=labour)
     assert bundle is not None
-    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(767310)
-    assert "그 값으로 올림" not in bundle.claim
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(657310)
+    assert "올림" not in bundle.claim
 
 
 def test_product_dataclass_round_trip() -> None:
