@@ -103,7 +103,7 @@ def _quote(part: RecipePart, product: DanawaProduct, today: date) -> str:
     low = product.low_price_krw or 0
     # Rows under the page's stated lowest price carry payment conditions the page excludes from that price.
     sellers = ", ".join(f"{o.mall} {o.price_krw:,}원" for o in [o for o in _ordered(product) if o.price_krw >= low][:3])
-    head = f"[동급 사양 비교의 {part.label}] {product.name}"
+    head = product.name
     spec = " ".join(product.description.split())[:_QUOTE_SPEC_CHARS]
     if spec:
         head += f" / 상세 스펙 {spec}"
@@ -173,7 +173,6 @@ def price_adders(
         if fragment is None:
             return f"adder_amount_missing:{adder.key}"
         quote = (
-            f"[가산액 근거: {adder.label}. 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임] "
             f"{fragment} / savetax.now 상세분석 화면, {today} 확인"
         )
         note = f"{adder.label} {adder.amount_krw:,}원 반영"
@@ -449,13 +448,25 @@ def build_recipe_bundle(
         f"[제출자 설명(화면 문구 아님): 조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 "
         f"동급 대체품의 가격 근거. 비교 단가 {benchmark:,}원{expression}의 구성 요소 "
     )
-    header = lead + "가격] [이하 판매 화면에서 옮긴 내용] "
-    adder_header = lead + "금액] [이하 주최 측 상세분석 화면에서 옮긴 내용] "
+
+    def part_header(p: PricedPart) -> str:
+        return f"{lead}가격. 이 근거는 동급 사양 비교의 {p.part.label}] [이하 판매 화면에서 옮긴 내용] "
+
+    def adder_header(adder: RecipeAdder) -> str:
+        return (
+            f"{lead}금액. 이 근거는 {adder.label}로, 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임] "
+            "[이하 주최 측 상세분석 화면에서 옮긴 내용] "
+        )
+
     if recipe.exact_sum:
-        evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
+        evidences = tuple(replace(p.evidence, quote=(part_header(p) + p.evidence.quote)[:2000]) for p in priced)
     else:
-        part_evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
-        adder_evidences = tuple(replace(e, quote=(adder_header + e.quote)[:2000]) for e in adder_evidence)
+        part_evidences = tuple(replace(p.evidence, quote=(part_header(p) + p.evidence.quote)[:2000]) for p in priced)
+        sourced_adders = [a for a in recipe.adders if a.source_url is not None]
+        adder_evidences = tuple(
+            replace(e, quote=(adder_header(a) + e.quote)[:2000])
+            for a, e in zip(sourced_adders, adder_evidence, strict=False)
+        )
         evidences = part_evidences + adder_evidences
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []

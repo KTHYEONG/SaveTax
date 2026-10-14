@@ -140,7 +140,7 @@ def test_sourced_adder_becomes_evidence() -> None:
     assert len(cited) == 1
     assert cited[0].observed_price_krw == 167310
     assert cited[0].source_url == "https://savetax.now/176"
-    assert cited[0].quote.startswith("[가산액 근거: ")
+    assert cited[0].quote.startswith("랙 설치 공식 공임 167,310원")
 
 
 def test_unsourced_adder_yields_no_evidence() -> None:
