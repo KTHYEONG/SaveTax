@@ -442,16 +442,17 @@ def build_recipe_bundle(
         expression = _sourced_sum_expression(priced, recipe.adders)
     else:
         expression = _sum_expression(priced) if recipe.exact_sum else ""
-    header = (
+    lead = (
         f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
-        f"비교 단가 {benchmark:,}원{expression}의 구성 요소 가격으로, "
-        "아래는 그 판매 화면에서 본 내용] "
+        f"비교 단가 {benchmark:,}원{expression}의 구성 요소 "
     )
+    header = lead + "가격으로, 아래는 그 판매 화면에서 본 내용] "
+    adder_header = lead + "금액으로, 아래는 주최 측 상세분석 화면에서 본 내용] "
     if recipe.exact_sum:
         evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
     else:
         part_evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
-        adder_evidences = tuple(replace(e, quote=(header + e.quote)[:2000]) for e in adder_evidence)
+        adder_evidences = tuple(replace(e, quote=(adder_header + e.quote)[:2000]) for e in adder_evidence)
         evidences = part_evidences + adder_evidences
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []

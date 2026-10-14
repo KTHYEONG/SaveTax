@@ -206,6 +206,10 @@ def test_sum_written_in_quote() -> None:
         assert "767원(= " in cited_ev.quote
         assert "CPU" in cited_ev.quote
         assert "랙 설치 공임" in cited_ev.quote
+    part_quote, adder_quote = (e.quote for e in bundle.lines[0].price_evidence)
+    assert "판매 화면" in part_quote
+    assert "판매 화면" not in adder_quote
+    assert "주최 측 상세분석 화면" in adder_quote
 
 
 def test_claim_omits_floor_raise() -> None:
