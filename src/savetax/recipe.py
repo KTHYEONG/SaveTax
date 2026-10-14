@@ -95,8 +95,9 @@ def _chosen_price(product: DanawaProduct, evidence: EvidenceConfig) -> int | Non
 
 def _quote(part: RecipePart, product: DanawaProduct, today: date) -> str:
     count = _offer_count(product)
-    sellers = ", ".join(f"{o.mall} {o.price_krw:,}원" for o in _ordered(product)[:3])
     low = product.low_price_krw or 0
+    # Rows under the page's stated lowest price carry payment conditions the page excludes from that price.
+    sellers = ", ".join(f"{o.mall} {o.price_krw:,}원" for o in [o for o in _ordered(product) if o.price_krw >= low][:3])
     head = f"[동급 사양 비교의 {part.label}] {product.name}"
     spec = " ".join(product.description.split())[:_QUOTE_SPEC_CHARS]
     if spec:

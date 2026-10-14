@@ -142,6 +142,14 @@ def test_unit_price_never_below_page_lowest() -> None:
     assert priced[0].observed_price_krw == 110
 
 
+def test_quote_omits_rows_below_the_stated_lowest_price() -> None:
+    html = _product_html("울트라5 225 정품", low=242, count=3, offers=[("몰A", 207, "무료"), ("몰B", 242, "무료"), ("몰C", 246, "무료")])
+    priced = price_parts(_recipe(parts=((_part(), 1),)), _fetcher({"pcode=11": (200, html)}, []), _evidence(recipe_min_offers=1), _TODAY, {})
+    assert not isinstance(priced, str)
+    assert "207원" not in priced[0].evidence.quote
+    assert "몰B 242원, 몰C 246원" in priced[0].evidence.quote
+
+
 def test_outlier_lowest_uses_second_for_b_but_not_observed() -> None:
     html = _product_html("울트라5 225 정품", low=100, count=3, offers=[("몰A", 100, "무료"), ("몰B", 120, "무료"), ("몰C", 121, "무료")])
     priced = price_parts(_recipe(parts=((_part(), 1),)), _fetcher({"pcode=11": (200, html)}, []), _evidence(recipe_min_offers=1), _TODAY, {})
