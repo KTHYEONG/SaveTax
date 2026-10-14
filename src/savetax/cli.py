@@ -84,6 +84,7 @@ def _build_parser() -> argparse.ArgumentParser:
     review.add_argument("--kind", choices=("submit", "revise", "withdraw"), default="submit")
     review.add_argument("--item")
     review.add_argument("--draft", type=Path)
+    review.add_argument("--reserve", type=int)
     approve = sub.add_parser("approve")
     approve.add_argument("--challenge", required=True)
     approve.add_argument("--note", required=True)
@@ -92,9 +93,11 @@ def _build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--draft", type=Path)
     approve.add_argument("--drafts-dir", type=Path)
     approve.add_argument("--limit", type=int)
+    approve.add_argument("--reserve", type=int)
     submit = sub.add_parser("submit")
     submit.add_argument("--execute", action="store_true")
     submit.add_argument("--limit", type=int)
+    submit.add_argument("--reserve", type=int)
     sub.add_parser("status")
     revise = sub.add_parser("revise")
     revise.add_argument("--item", required=True)
@@ -763,6 +766,16 @@ def _submission_stack(
     return config, competition, submissions, fetcher
 
 
+def _reserve(args: argparse.Namespace, default: int) -> int:
+    """Claim-count reserve for this run; --reserve overrides the configured default and must be >= 0."""
+    value = getattr(args, "reserve", None)
+    if value is None:
+        return default
+    if value < 0:
+        raise ConfigError("[SYS] reserve must be >= 0")
+    return int(value)
+
+
 def _run_review(
     args: argparse.Namespace, environ: Mapping[str, str] | None,
     transport: Transport | None, write_transport: WriteTransport | None,
@@ -796,7 +809,7 @@ def _run_review(
     ledger = Ledger(approval.ledger_path, now=_utcnow)
     run_review(joined, event=competition.get_event(), status=competition.get_me(),
                competition=competition, submission_client=submissions,
-               ledger=ledger, now=now, limit=args.limit, reserve=approval.reserve_claims)
+               ledger=ledger, now=now, limit=args.limit, reserve=_reserve(args, approval.reserve_claims))
     return 0
 
 
@@ -820,7 +833,7 @@ def _run_approve(
     run_approve(joined, event=competition.get_event(), status=competition.get_me(),
                 competition=competition, submission_client=submissions, ledger=ledger, now=now,
                 challenge=args.challenge, note=args.note, kind=args.kind, item=args.item,
-                reserve=approval.reserve_claims, limit=args.limit)
+                reserve=_reserve(args, approval.reserve_claims), limit=args.limit)
     return 0
 
 
@@ -853,7 +866,7 @@ def _run_submit(
         fetch_price=lambda url: _live_price(fetcher, url),
         fetch_row_prices=lambda url: _live_row_prices(fetcher, url), now=now,
         ttl=timedelta(hours=approval.ttl_hours),
-        reserve=approval.reserve_claims, execute=True, limit=args.limit, sleep=time.sleep,
+        reserve=_reserve(args, approval.reserve_claims), execute=True, limit=args.limit, sleep=time.sleep,
         poll_seconds=approval.lint_poll_seconds, timeout_seconds=approval.lint_timeout_seconds,
         pause_seconds=approval.pause_between_submits_seconds,
         stop_after_consecutive_suspect=approval.stop_after_consecutive_suspect,

@@ -211,6 +211,24 @@ def test_approval_config_defaults_and_bounds() -> None:
             ApprovalConfig(**kw)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(("value", "expected"), [(None, 5), (0, 0), (3, 3)])
+def test_reserve_override_defaults_to_config(value: int | None, expected: int) -> None:
+    import argparse
+
+    from src.savetax.cli import _reserve
+
+    assert _reserve(argparse.Namespace(reserve=value), 5) == expected
+
+
+def test_negative_reserve_rejected() -> None:
+    import argparse
+
+    from src.savetax.cli import _reserve
+
+    with pytest.raises(ConfigError, match="reserve"):
+        _reserve(argparse.Namespace(reserve=-1), 5)
+
+
 def test_review_limit_validated(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.chdir(tmp_path)
     _stage(tmp_path)
