@@ -46,6 +46,8 @@ _MALL_UL_RE = re.compile(
 _LI_ANY_RE = re.compile(r"<li\b[^>]*>(.*?)</li>", re.IGNORECASE | re.DOTALL)
 _ARIA_RE = re.compile(r"aria-label=\"([^\"]+)\"", re.IGNORECASE)
 _IMG_ALT_RE = re.compile(r"<img\b[^>]*\balt=\"([^\"]+)\"", re.IGNORECASE | re.DOTALL)
+_LOGO_BOX_RE = re.compile(r"<div\b[^>]*class=\"[^\"]*box__logo[^\"]*\"[^>]*>(.*?)</div>", re.IGNORECASE | re.DOTALL)
+_LOGO_NAME_RE = re.compile(r"(?:aria-label|alt)=(?:\"([^\"]+)\"|'([^']+)')", re.IGNORECASE)
 _NUM_SPAN_RE = re.compile(
     r"<span\b[^>]*class=\"[^\"]*text__num[^\"]*\"[^>]*>(.*?)</span>",
     re.IGNORECASE | re.DOTALL,
@@ -185,8 +187,14 @@ def _offer_rows(html: str) -> tuple[MallOffer, ...]:
     for ul in _MALL_UL_RE.finditer(html):
         for item in _LI_ANY_RE.finditer(ul.group(1)):
             body = item.group(0)
+            # The mall is the logo (image alt for open markets, text label for stores); the row's own aria-label is
+            # the generic "상품보기" link and names no seller.
+            logo = _LOGO_BOX_RE.search(body)
+            logo_name = _LOGO_NAME_RE.search(logo.group(1)) if logo else None
             mall_match = _ARIA_RE.search(body)
-            mall = mall_match.group(1).strip() if mall_match else None
+            mall = (logo_name.group(1) or logo_name.group(2)) if logo_name else None
+            if not mall:
+                mall = mall_match.group(1).strip() if mall_match else None
             if not mall:
                 alt_match = _IMG_ALT_RE.search(body)
                 mall = alt_match.group(1).strip() if alt_match else None

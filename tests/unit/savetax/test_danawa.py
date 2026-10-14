@@ -239,3 +239,18 @@ def test_history_skips_bad_entries() -> None:
         }
     )
     assert parse_price_history(payload) == {"2025-10": 1500000}
+
+
+def test_offer_mall_comes_from_logo_not_generic_link_label() -> None:
+    html = (
+        '<script type="application/ld+json">{"@type": "Product", "name": "N"}</script>'
+        '<ul class="list__mall-price">'
+        "<li><div class=\"box__logo\"><img src='x.gif' class='image' alt='G마켓'></div>"
+        '<span class="text__num">1,000</span><a aria-label="상품보기"></a></li>'
+        '<li><div class="box__logo"><span class="text__logo" role="img" aria-label="판매사">판매사</span></div>'
+        '<span class="text__num">1,010</span><span>무료배송</span><a aria-label="상품보기"></a></li>'
+        '<li><div class="box__logo"></div><span class="text__num">1,020</span><a aria-label="상품보기"></a></li>'
+        "</ul>"
+    )
+    product = parse_product(html, "1")
+    assert [offer.mall for offer in product.offers] == ["G마켓", "판매사", "상품보기"]
