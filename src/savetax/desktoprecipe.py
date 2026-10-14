@@ -151,15 +151,11 @@ def desktop_recipe(attributes: Mapping[str, str], evidence: EvidenceConfig) -> R
         differences.append("전원 용량 속성이 없어 형식에 맞는 기준 전원을 썼다")
         review = True
     else:
-        norm_psu = raw_psu.upper().replace(" ", "")
-        if norm_psu == "500W":
-            psu_key = "psu:500W"
-        elif norm_psu == "400W":
-            psu_key = "psu:400W"
-        else:
+        psu_key = _psu_part(raw_psu, form)
+        if psu_key is None:
             return "psu_unmapped"
     parts.append((_by_key(evidence.recipe_parts, psu_key), 1))
-    parts.append((_by_key(evidence.recipe_parts, "case:tower" if form == "tower" else "case:slim"), 1))
+    parts.append((_by_key(evidence.recipe_parts, _case_part(form, psu_key)), 1))
     raw_gpu = attributes.get(_GPU)
     if raw_gpu is not None and not _GPU_RE.search(raw_gpu):
         return "discrete_graphics"
@@ -170,8 +166,10 @@ def desktop_recipe(attributes: Mapping[str, str], evidence: EvidenceConfig) -> R
     if raw_odd is not None and raw_odd.strip() not in _ODD_OK:
         return "odd_included"
     parts.append((_by_key(evidence.recipe_parts, "kbm"), 1))
-    adders = tuple(a for a in evidence.recipe_adders if a.key in ("desktop:assembly", "desktop:reader"))
-    if len(adders) != 2:
+    if (attributes.get(_READER) or "").strip() in _READER_OK:
+        parts.append((_by_key(evidence.recipe_parts, "reader"), 1))
+    adders = tuple(a for a in evidence.recipe_adders if a.key == "desktop:assembly")
+    if len(adders) != 1:
         raise ConfigError("[SYS] invalid recipe_adders: desktop adders missing")
     spec_rows = (
         ("CPU", raw_cpu, _by_key(evidence.recipe_parts, cpu_ref).label),
@@ -180,7 +178,7 @@ def desktop_recipe(attributes: Mapping[str, str], evidence: EvidenceConfig) -> R
         ("HDD", hdd_proc if hdd_proc else "-", hdd_ref if hdd_ref else "-"),
         ("메인보드", raw_mb, _by_key(evidence.recipe_parts, mb_part_key).label),
         ("전원", raw_psu if raw_psu else "-", _by_key(evidence.recipe_parts, psu_key).label),
-        ("형식", raw_form, _by_key(evidence.recipe_parts, "case:tower" if form == "tower" else "case:slim").label),
+        ("형식", raw_form, _by_key(evidence.recipe_parts, _case_part(form, psu_key)).label),
     )
     return Recipe(
         kind="desktop",
@@ -189,7 +187,7 @@ def desktop_recipe(attributes: Mapping[str, str], evidence: EvidenceConfig) -> R
         spec_rows=spec_rows,
         differences=tuple(differences),
         review_required=review,
-        precedent_urls=("https://savetax.now/505", "https://savetax.now/405"),
+        precedent_urls=({"ULTRA 7 265": ("https://savetax.now/520",), "ULTRA 5 225": ("https://savetax.now/497", "https://savetax.now/519"), "ULTRA 5 235": ("https://savetax.now/486",), "I5 14400": ("https://savetax.now/459",)}.get(cpu_key, ("https://savetax.now/405",))),
         title_phrase="동급 사양 부품 합산가",
     )
 
@@ -335,3 +333,26 @@ def delivery_terms_ok(
             logger.info("[EVIDENCE] item_id=%s contract=%s terms_mismatch", redact(item_id), redact(contract_no))
             return False
     return True
+
+
+_PSU_WATTS_RE = re.compile(r"^(\d{3,4})W$")
+
+
+def _psu_part(raw_psu: str, form: str) -> str | None:
+    """Map a procured PSU rating to the smallest reference PSU of the same form that is at least as large."""
+    match = _PSU_WATTS_RE.match(raw_psu.upper().replace(" ", ""))
+    if match is None:
+        return None
+    watts = int(match.group(1))
+    if form == "tower":
+        return "psu:500W" if watts <= 500 else None
+    if watts <= 400:
+        return "psu:400W"
+    return "psu:450W-SFX" if watts <= 450 else None
+
+
+def _case_part(form: str, psu_key: str) -> str:
+    # A slim SFX supply needs the organizer's SFX-ready slim case (savetax.now/507), not the TFX slim case.
+    if form == "tower":
+        return "case:tower"
+    return "case:slim-sfx" if psu_key == "psu:450W-SFX" else "case:slim"

@@ -19,10 +19,11 @@ from src.savetax.fixturerecipe import panel_recipe, rack_recipe
 from src.savetax.http import HttpResponse
 from src.savetax.publicweb import PublicFetcher
 from src.savetax.rawapi import ListingDetail
+from tests.unit.savetax.recipe_fixtures import seller_config
 
 
 def _evidence(**over: Any) -> EvidenceConfig:
-    return EvidenceConfig(**over)  # type: ignore[arg-type]
+    return seller_config(**over)
 
 
 def _panel_attrs(**over: str) -> dict[str, str]:
@@ -207,6 +208,14 @@ def _product_html(name: str) -> str:
 
 def _fetcher(evidence: EvidenceConfig) -> PublicFetcher:
     def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        if url in ("https://savetax.now/222", "https://savetax.now/621", "https://savetax.now/176"):
+            amounts = {"https://savetax.now/222": "401,649원 표준품셈", "https://savetax.now/621": "79,164원 표준품셈",
+                       "https://savetax.now/176": "167,310원 표준품셈"}
+            return HttpResponse(status=200, headers={}, body=amounts[url].encode(), elapsed_seconds=0.01)
+        if "pcode=" not in url:
+            title = "IN-50U6A24P 24포트 LD-SGDR750 H1200 H1400 H1600 H1800 H2000"
+            body = f"<html><head><title>{title}</title></head><body><p>판매가 100,000원</p></body></html>"
+            return HttpResponse(status=200, headers={}, body=body.encode(), elapsed_seconds=0.01)
         pcode = url.rsplit("pcode=", 1)[-1]
         return HttpResponse(status=200, headers={}, body=_product_html(_NAMES[pcode]).encode(), elapsed_seconds=0.01)
 
@@ -254,7 +263,7 @@ def _dataset(category: str) -> Any:
 
 
 def test_panel_lane_writes_bundle_and_draft(tmp_path: Path) -> None:
-    evidence = EvidenceConfig()
+    evidence = seller_config()
     out = tmp_path / "out"
     n, avail, drafts = _run_recipe_lane(_Competition(_panel_name()), _Raw(_panel_attrs()), _fetcher(evidence),
                                         evidence, AuditConfig(), out, _dataset("랙캐비닛용패널"), None, 10, False, "panel")
@@ -263,7 +272,7 @@ def test_panel_lane_writes_bundle_and_draft(tmp_path: Path) -> None:
 
 
 def test_rack_lane_writes_bundle_and_draft(tmp_path: Path) -> None:
-    evidence = EvidenceConfig()
+    evidence = seller_config()
     out = tmp_path / "out"
     n, avail, drafts = _run_recipe_lane(_Competition("허브랙"), _Raw(_rack_attrs()), _fetcher(evidence),
                                         evidence, AuditConfig(), out, _dataset("네트워크시스템장비용랙"), None, 10, False, "rack")
@@ -271,7 +280,7 @@ def test_rack_lane_writes_bundle_and_draft(tmp_path: Path) -> None:
 
 
 def test_panel_lane_skips_unmapped_and_rack_review_gated(tmp_path: Path) -> None:
-    evidence = EvidenceConfig()
+    evidence = seller_config()
     _, _, drafts = _run_recipe_lane(_Competition("보호커버"), _Raw({"종류": "보호패널"}), _fetcher(evidence),
                                     evidence, AuditConfig(), tmp_path / "o1", _dataset("랙캐비닛용패널"), None, 10, False, "panel")
     assert drafts == 0
@@ -301,7 +310,7 @@ def test_fixture_lane_preserves_facts_across_contracts(tmp_path: Path, kind: str
 
     from src.savetax.workflow import load_bundles
 
-    evidence = EvidenceConfig()
+    evidence = seller_config()
     attrs = _panel_attrs() if kind == "panel" else _rack_attrs()
     name = _panel_name() if kind == "panel" else "허브랙"
     category = evidence.panel_category if kind == "panel" else evidence.rack_category
@@ -312,3 +321,25 @@ def test_fixture_lane_preserves_facts_across_contracts(tmp_path: Path, kind: str
     bundle = load_bundles([tmp_path / "recipe-bundles.jsonl"], now=datetime.now(UTC))["I1"]
     assert {line.fact_id for line in bundle.lines} == {"f1", "f2"}
     assert not bundle.rejected
+
+
+def test_panel_enclosure_selects_enclosure_part() -> None:
+    recipe = panel_recipe("패치판넬 함체형 24PORT CAT.6A", {"종류": "패치판넬"}, _evidence())
+    assert not isinstance(recipe, str)
+    assert recipe.parts[0][0].mount_form == "enclosure"
+
+
+def test_panel_mount_mismatch_without_matching_part() -> None:
+    from src.savetax.config import RecipePart
+    from src.savetax.fixturerecipe import _panel_part_for_mount
+
+    rack_only = (RecipePart("panel:99", "패널", ("https://fibermart.co.kr/x",), ("24포트",), "rack"),)
+    assert _panel_part_for_mount(rack_only, True) is None
+    assert _panel_part_for_mount(rack_only, False) is not None
+    custom = (RecipePart("panel:99", "패널", ("https://fibermart.co.kr/x",), ("24포트",), "rack"),)
+    assert _panel_part_for_mount(custom, False) == custom[0]
+    base = _evidence()
+    no_enclosure = tuple(p for p in base.recipe_parts if not (p.key.startswith("panel:") and p.mount_form == "enclosure"))
+    assert any(p.key == "panel:24" for p in no_enclosure)
+    ev = _evidence(recipe_parts=no_enclosure)
+    assert panel_recipe("패치 함체 24PORT", {"종류": "패치판넬"}, ev) == "mount_form_mismatch"

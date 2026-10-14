@@ -294,3 +294,46 @@ def test_request_resolution_retry_never_logs_key(caplog: pytest.LogCaptureFixtur
     with caplog.at_level("DEBUG"), pytest.raises(NetworkError):
         client.get(f"https://hackathon.savetax.now/v1/events/current/submission-requests/{key}", authenticated=True)
     assert key not in caplog.text
+
+
+def _fake_body_response(body: bytes, encoding: str | None) -> object:
+    class FakeHeaders:
+        def items(self) -> list[tuple[str, str]]:
+            return [("Content-Encoding", encoding)] if encoding else []
+
+    class FakeResp:
+        status = 200
+        headers = FakeHeaders()
+
+        def read(self) -> bytes:
+            return body
+
+        def close(self) -> None:
+            pass
+
+    return FakeResp()
+
+
+@pytest.mark.parametrize("encoding", ["gzip", None])
+def test_gzip_body_is_decoded(monkeypatch: pytest.MonkeyPatch, encoding: str | None) -> None:
+    import gzip
+
+    payload = gzip.compress("판매가 87,580".encode())
+    monkeypatch.setattr(http_mod.opener, "open", lambda req, timeout=0: _fake_body_response(payload, encoding))
+    resp = http_mod.urllib_transport("https://usr.icoda.co.kr/item/view/1", {}, 5.0)
+    assert resp.body.decode() == "판매가 87,580"
+
+
+def test_corrupt_gzip_body_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(http_mod.opener, "open", lambda req, timeout=0: _fake_body_response(b"\x1f\x8bnot-gzip", "gzip"))
+    with pytest.raises(DataIntegrityError, match="not valid gzip"):
+        http_mod.urllib_transport("https://usr.icoda.co.kr/item/view/1", {}, 5.0)
+
+
+def test_oversized_gzip_body_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import gzip
+
+    monkeypatch.setattr(http_mod, "_MAX_DECODED_BYTES", 4)
+    monkeypatch.setattr(http_mod.opener, "open", lambda req, timeout=0: _fake_body_response(gzip.compress(b"123456"), "gzip"))
+    with pytest.raises(DataIntegrityError, match="size limit"):
+        http_mod.urllib_transport("https://usr.icoda.co.kr/item/view/1", {}, 5.0)

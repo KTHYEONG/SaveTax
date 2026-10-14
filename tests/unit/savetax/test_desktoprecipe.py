@@ -43,7 +43,7 @@ def test_full_set_maps_to_eight_parts() -> None:
     assert [p.key for p, _ in recipe.parts] == [
         "cpu:ULTRA 5 225", "ram:16", "ssd:500", "hdd:2", "mb:H810", "psu:500W", "case:tower", "kbm",
     ]
-    assert len(recipe.adders) == 2
+    assert len(recipe.adders) == 1
     assert recipe.review_required is False
 
 
@@ -112,7 +112,7 @@ def test_unknown_specs_rejected() -> None:
     assert desktop_recipe(_attrs(**{"컴퓨터형식": "빅타워"}), _evidence()) == "form_unmapped"
     assert desktop_recipe(_attrs(**{"SSD용량": "1"}), _evidence()) == "ssd_unmapped"
     assert desktop_recipe(_attrs(**{"메모리(RAM)용량": "8"}), _evidence()) == "ram_unmapped"
-    assert desktop_recipe(_attrs(**{"스위칭모드파워서플라이형식": "450W"}), _evidence()) == "psu_unmapped"
+    assert desktop_recipe(_attrs(**{"스위칭모드파워서플라이형식": "600W"}), _evidence()) == "psu_unmapped"
     assert desktop_recipe(_attrs(**{"하드디스크(HDD)용량": "4"}), _evidence()) == "hdd_unmapped"
 
 
@@ -205,7 +205,7 @@ def test_only_desktop_adders_selected_and_spec_rows_use_labels() -> None:
     ev = _evidence()
     recipe = desktop_recipe(_attrs(), _evidence(recipe_adders=(*ev.recipe_adders, RecipeAdder("other", "공임", 100, "basis"))))
     assert not isinstance(recipe, str)
-    assert [a.key for a in recipe.adders] == ["desktop:assembly", "desktop:reader"]
+    assert [a.key for a in recipe.adders] == ["desktop:assembly"]
     assert all(a in ev.recipe_adders for a in recipe.adders)
     assert recipe.spec_rows[0][2] == "CPU"
     with pytest.raises(ConfigError, match="desktop adders missing"):

@@ -10,6 +10,7 @@ from src.savetax.cli import _live_price, _run_recipe_lane
 from src.savetax.config import EvidenceConfig, SaveTaxConfig
 from src.savetax.http import HttpResponse
 from src.savetax.publicweb import PublicFetcher
+from tests.unit.savetax.recipe_fixtures import seller_config
 
 
 def _fetcher(body: str, status: int = 200) -> PublicFetcher:
@@ -84,10 +85,14 @@ def test_recipe_lane_skips_unreadable_adder(tmp_path: Any, monkeypatch: Any, cap
 
     from src.savetax.config import AuditConfig
 
-    evidence = EvidenceConfig(public_request_interval_seconds=0.0)
+    evidence = seller_config(public_request_interval_seconds=0.0)
 
     def lane_transport(url: str, headers: object, timeout: float) -> HttpResponse:
         assert "Authorization" not in headers  # type: ignore[operator]
+        if "fibermart.co.kr" in url or "rftown.net" in url or "netzone.co.kr" in url or "compuzone.co.kr/fixture/" in url:
+            html = ("<html><head><title>LD-SGDR750 H1200 허브랙</title></head>"
+                    "<body><p>판매가 300,000원</p></body></html>")
+            return HttpResponse(status=200, headers={}, body=html.encode(), elapsed_seconds=0.01)
         if "prod.danawa.com" in url:
             html = (
                 "<html><head><script type=\"application/ld+json\">"

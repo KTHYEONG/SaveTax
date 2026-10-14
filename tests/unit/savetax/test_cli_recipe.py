@@ -19,6 +19,7 @@ from src.savetax.errors import ConfigError
 from src.savetax.http import HttpResponse
 from src.savetax.publicweb import PublicFetcher
 from src.savetax.rawapi import ListingDetail
+from tests.unit.savetax.recipe_fixtures import seller_config
 
 
 def _attrs() -> dict[str, str]:
@@ -74,7 +75,17 @@ _NAMES = {
 
 
 def _fetcher(evidence: EvidenceConfig) -> PublicFetcher:
+    _SUPER = ("울트라5 225 정품 울트라5 235 정품 울트라7 265 i5 14400 정품 i5 14500 정품 i7 14700 정품 "
+              "DDR5 5600 16GB T500 500GB WD Blue 2TB H610M H810M B760M B860M 500W 400 TFX TA20 미니멀 KM C1 IN-UACARD")
+
     def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        if url == "https://savetax.now/520":
+            return HttpResponse(status=200, headers={}, body="조립 25,000원 표준품셈 안내".encode(), elapsed_seconds=0.01)
+        if "savetax.now" in url:
+            return HttpResponse(status=200, headers={}, body="공임 167,310원 표준품셈".encode(), elapsed_seconds=0.01)
+        if "pcode=" not in url:
+            body = f"<html><head><title>{_SUPER}</title></head><body><p>판매가 100,000원</p></body></html>"
+            return HttpResponse(status=200, headers={}, body=body.encode(), elapsed_seconds=0.01)
         pcode = url.rsplit("pcode=", 1)[-1]
         body = _product_html(_NAMES.get(pcode, "X"), 100000)
         return HttpResponse(status=200, headers={}, body=body.encode(), elapsed_seconds=0.01)
@@ -155,9 +166,11 @@ def test_recipe_lane_skips_unmapped(tmp_path: Path) -> None:
 
 def test_parser_has_recipe_lane_and_owned_rejected() -> None:
     parser = _build_parser()
-    args = parser.parse_args(["evidence", "--lane", "recipe", "--recipe-kind", "desktop-pc"])
+    args = parser.parse_args(["evidence", "--lane", "recipe", "--recipe-kind", "desktop"])
     assert args.lane == "recipe"
-    assert args.recipe_kind == "desktop-pc"
+    assert args.recipe_kind == "desktop"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["evidence", "--lane", "recipe", "--recipe-kind", "desktop-pc"])
     from src.savetax.cli import _run_evidence
 
     owned_args = parser.parse_args(["evidence", "--lane", "recipe", "--owned"])
@@ -227,7 +240,7 @@ def test_recipe_lane_price_skip_and_bundle_none(tmp_path: Path) -> None:
 def test_recipe_lane_review_gated_and_api_error(tmp_path: Path) -> None:
     from src.savetax.errors import ApiError
 
-    evidence = EvidenceConfig()
+    evidence = seller_config()
     review_attrs = _attrs()
     review_attrs["중앙처리장치(CPU)규격"] = "i5-13500"
     out = tmp_path / "out"
@@ -327,6 +340,13 @@ def _pc_fetcher(evidence: EvidenceConfig) -> PublicFetcher:
     names = _pc_names()
 
     def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        if url == "https://savetax.now/520":
+            return HttpResponse(status=200, headers={}, body="조립 25,000원 표준품셈 안내".encode(), elapsed_seconds=0.01)
+        if "pcode=" not in url:
+            super_title = ("울트라5 225 정품 AG251 16GB 512GB KM C1 IN-UACARD WD Blue 2TB "
+                           "DDR5 5600 16GB T500 500GB H610M H810M")
+            body = f"<html><head><title>{super_title}</title></head><body><p>판매가 100,000원</p></body></html>"
+            return HttpResponse(status=200, headers={}, body=body.encode(), elapsed_seconds=0.01)
         pcode = url.rsplit("pcode=", 1)[-1]
         body = _product_html(names.get(pcode, "X"), 100000)
         return HttpResponse(status=200, headers={}, body=body.encode(), elapsed_seconds=0.01)
@@ -337,10 +357,9 @@ def _pc_fetcher(evidence: EvidenceConfig) -> PublicFetcher:
 def test_desktop_pc_lane_writes_bundle(tmp_path: Path) -> None:
     evidence = EvidenceConfig(recipe_min_offers=1)
     out = tmp_path / "out"
-    n, avail, drafts = _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence),
-                                        evidence, AuditConfig(), out, _dataset(tmp_path), None, 10, False, "desktop-pc")
-    assert (n, avail, drafts) == (1, 1, 1)
-    assert (out / "recipe-bundles.jsonl").is_file()
+    with pytest.raises(ConfigError, match="invalid recipe_kind"):
+        _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence),
+                         evidence, AuditConfig(), out, _dataset(tmp_path), None, 10, False, "desktop-pc")
 
 
 def test_owned_recipe_run_writes_under_owned(tmp_path: Path) -> None:
@@ -357,8 +376,8 @@ def test_owned_recipe_run_writes_under_owned(tmp_path: Path) -> None:
 
     evidence = EvidenceConfig()
     out = tmp_path / "out"
-    n, avail, drafts = _run_recipe_lane(_OwnedComp((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence),
-                                        evidence, AuditConfig(), out, _dataset(tmp_path), ["I1"], 10, False, "desktop-pc", owned=True)
+    n, avail, drafts = _run_recipe_lane(_OwnedComp((_fact(),)), _Raw(_attrs()), _fetcher(evidence),
+                                        evidence, AuditConfig(), out, _dataset(tmp_path), ["I1"], 10, False, "desktop", owned=True)
     assert drafts == 1
     assert (out / "owned" / "recipe-bundles.jsonl").is_file()
     assert (out / "owned" / "drafts" / "recipe" / "I1.json").is_file()
@@ -385,10 +404,10 @@ def test_invalid_recipe_kind_rejected(tmp_path: Path) -> None:
 
 def test_desktop_pc_unmapped_skipped(tmp_path: Path) -> None:
     bad = _attrs()
-    bad["중앙처리장치(CPU)규격"] = "i5-14400"
+    bad["중앙처리장치(CPU)규격"] = "AMD X"
     evidence = EvidenceConfig()
-    _, _, drafts = _run_recipe_lane(_Competition((_fact(),)), _Raw(bad), _pc_fetcher(evidence),
-                                    evidence, AuditConfig(), tmp_path / "out", _dataset(tmp_path), None, 10, False, "desktop-pc")
+    _, _, drafts = _run_recipe_lane(_Competition((_fact(),)), _Raw(bad), _fetcher(evidence),
+                                    evidence, AuditConfig(), tmp_path / "out", _dataset(tmp_path), None, 10, False, "desktop")
     assert drafts == 0
 
 
@@ -398,7 +417,7 @@ def test_run_evidence_owned_recipe_delegates(tmp_path: Path, monkeypatch: Any) -
     base = {
         "limit": 5, "batch": 0, "batches": 1, "data_dir": None, "out_dir": tmp_path / "o",
         "items": "I1", "include_review": False, "unit_policy": "annotate",
-        "variant_policy": "series", "recipe_kind": "desktop-pc",
+        "variant_policy": "series", "recipe_kind": "desktop",
     }
     calls: dict[str, Any] = {}
 
@@ -426,8 +445,8 @@ def test_run_evidence_owned_recipe_delegates(tmp_path: Path, monkeypatch: Any) -
 def test_owned_recipe_requires_items_at_lane_entry(tmp_path: Path) -> None:
     evidence = EvidenceConfig()
     with pytest.raises(ConfigError, match="requires --items"):
-        _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence), evidence,
-                         AuditConfig(), tmp_path, _dataset(tmp_path), None, 10, False, "desktop-pc", owned=True)
+        _run_recipe_lane(_Competition((_fact(),)), _Raw(_attrs()), _fetcher(evidence), evidence,
+                         AuditConfig(), tmp_path, _dataset(tmp_path), None, 10, False, "desktop", owned=True)
 
 
 @pytest.mark.parametrize(("total", "truncated"), [(None, False), (2, False), (1, True)])
@@ -445,6 +464,6 @@ def test_owned_recipe_refuses_incomplete_facts(tmp_path: Path, total, truncated)
 
     evidence = EvidenceConfig()
     with pytest.raises(DataAccessPending):
-        _run_recipe_lane(OwnedCompetition((_fact(),)), _Raw(_attrs()), _pc_fetcher(evidence), evidence,
-                         AuditConfig(), tmp_path, _dataset(tmp_path), ["I1"], 10, False, "desktop-pc", owned=True)
+        _run_recipe_lane(OwnedCompetition((_fact(),)), _Raw(_attrs()), _fetcher(evidence), evidence,
+                         AuditConfig(), tmp_path, _dataset(tmp_path), ["I1"], 10, False, "desktop", owned=True)
     assert not (tmp_path / "owned" / "drafts").exists()

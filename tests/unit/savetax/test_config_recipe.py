@@ -122,3 +122,55 @@ def test_invalid_reference_field_types_raise_config_error() -> None:
     for ref in (DesktopPcRef(None, "pc:ULTRA 5 225", "H810"), DesktopPcRef("ULTRA 5 225", [], "H810")):
         with pytest.raises(ConfigError, match="desktop_pc_refs"):
             _evidence(desktop_pc_refs=(ref,))
+
+
+def test_recipe_part_list_inputs_normalised() -> None:
+    part = RecipePart("k", "L", ["https://compuzone.co.kr/a"], ["A"])  # type: ignore[arg-type]
+    assert part.sources == ("https://compuzone.co.kr/a",)
+    assert part.name_tokens == ("A",)
+    part2 = RecipePart("k2", "L", "https://compuzone.co.kr/b", ("A",))
+    assert part2.sources == ("https://compuzone.co.kr/b",)
+
+
+def test_recipe_part_sources_type_guards() -> None:
+    from src.savetax.config import _check_recipe_parts
+
+    good = RecipePart("k", "L", ("https://compuzone.co.kr/a",), ("A",))
+    assert _check_recipe_parts((good,)) == (good,)
+    bad_str = RecipePart.__new__(RecipePart)
+    object.__setattr__(bad_str, "key", "k")
+    object.__setattr__(bad_str, "label", "L")
+    object.__setattr__(bad_str, "sources", "https://x")
+    object.__setattr__(bad_str, "name_tokens", ("A",))
+    object.__setattr__(bad_str, "mount_form", None)
+    object.__setattr__(bad_str, "pcode", "")
+    with pytest.raises(ConfigError):
+        _check_recipe_parts((bad_str,))
+    bad_int = RecipePart.__new__(RecipePart)
+    object.__setattr__(bad_int, "key", "k")
+    object.__setattr__(bad_int, "label", "L")
+    object.__setattr__(bad_int, "sources", 123)
+    object.__setattr__(bad_int, "name_tokens", ("A",))
+    object.__setattr__(bad_int, "mount_form", None)
+    object.__setattr__(bad_int, "pcode", "")
+    with pytest.raises(ConfigError):
+        _check_recipe_parts((bad_int,))
+    with pytest.raises(ConfigError):
+        _evidence(recipe_parts=(RecipePart("k", "L", ("not a url",), ("A",)),))
+    with pytest.raises(ConfigError):
+        _evidence(recipe_parts=(RecipePart("k", "L", (), ("A",)),))
+    with pytest.raises(ConfigError):
+        _evidence(recipe_parts=(RecipePart("k", "L", ("https://compuzone.co.kr/a",), ("A",), "shelf"),))  # type: ignore[arg-type]
+
+
+def test_recipe_band_upper_and_evidence_hosts_guarded() -> None:
+    with pytest.raises(ConfigError):
+        _evidence(recipe_band_upper=Decimal("1.20"))
+    with pytest.raises(ConfigError):
+        _evidence(evidence_hosts=())
+    with pytest.raises(ConfigError):
+        _evidence(evidence_hosts=("hackathon.savetax.now",))
+    with pytest.raises(ConfigError):
+        _evidence(recipe_parts=(RecipePart("k", "L", ("https://other.example/a",), ("A",)),))
+    with pytest.raises(ConfigError):
+        _evidence(recipe_parts=(RecipePart("k", "L", ("",), ("A",)),))

@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from _typeshed import SupportsWrite
@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--online", action="store_true")
     evidence = sub.add_parser("evidence")
     evidence.add_argument("--lane", choices=("cross", "retail", "agency", "recipe", "all"), default="cross")
-    evidence.add_argument("--recipe-kind", choices=("desktop", "desktop-pc", "panel", "rack"), default="desktop")
+    evidence.add_argument("--recipe-kind", choices=("desktop", "panel", "rack"), default="desktop")
     evidence.add_argument("--limit", type=int, default=50)
     evidence.add_argument("--items")
     evidence.add_argument("--batch", type=int, default=0)
@@ -437,8 +437,7 @@ def _run_recipe_lane(
     recipe_kind: str,
     owned: bool = False,
 ) -> tuple[int, int, int]:
-    from src.savetax.danawa import DanawaProduct
-    from src.savetax.desktoprecipe import delivery_terms_ok, desktop_pc_recipe, desktop_recipe, find_recipe_candidates
+    from src.savetax.desktoprecipe import delivery_terms_ok, desktop_recipe, find_recipe_candidates
     from src.savetax.errors import DataIntegrityError
     from src.savetax.evidence import RejectedFact
     from src.savetax.fixturerecipe import panel_recipe, rack_recipe
@@ -446,14 +445,14 @@ def _run_recipe_lane(
     _ = audit
     if owned and not wanted:
         raise ConfigError("[SYS] owned recipe mode requires --items")
-    if recipe_kind in ("desktop", "desktop-pc"):
+    if recipe_kind == "desktop":
         category = evidence.desktop_category
     elif recipe_kind == "panel":
         category = evidence.panel_category
     elif recipe_kind == "rack":
         category = evidence.rack_category
     else:
-        raise ConfigError(f"[SYS] invalid recipe_kind: {recipe_kind!r} must be desktop, desktop-pc, panel or rack")
+        raise ConfigError(f"[SYS] invalid recipe_kind: {recipe_kind!r} must be desktop, panel or rack")
     allowed = frozenset({ItemState.CLAIMED_BY_ME}) if owned else frozenset({ItemState.AVAILABLE})
     bundle_path = Path(out_dir) / "owned" / "recipe-bundles.jsonl" if owned else Path(out_dir) / "recipe-bundles.jsonl"
     draft_dir = Path(out_dir) / "owned" / "drafts" / "recipe" if owned else Path(out_dir) / "drafts" / "recipe"
@@ -469,7 +468,7 @@ def _run_recipe_lane(
         available_n = len(available)
         event = competition.get_event()
         today = date.today()
-        cache: dict[str, DanawaProduct | str] = {}
+        cache: dict[str, object] = {}
         for item_id in available[:limit]:
             try:
                 attributes = raw.get_item_attributes(item_id)
@@ -478,12 +477,6 @@ def _run_recipe_lane(
                     continue
                 if recipe_kind == "desktop":
                     recipe = desktop_recipe(attributes, evidence)
-                    if isinstance(recipe, str):
-                        logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
-                        continue
-                    detail = competition.get_item(item_id)
-                elif recipe_kind == "desktop-pc":
-                    recipe = desktop_pc_recipe(attributes, evidence)
                     if isinstance(recipe, str):
                         logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, recipe)
                         continue
@@ -500,7 +493,7 @@ def _run_recipe_lane(
                         continue
                 if owned and (detail.facts_total is None or detail.facts_truncated or detail.facts_total != len(detail.facts)):
                     raise DataAccessPending("[DATA] own item facts unavailable: 자료 접근 대기")
-                if recipe_kind in ("desktop", "desktop-pc"):
+                if recipe_kind == "desktop":
                     bad_contracts = {
                         contract_no
                         for contract_no in {fact.contract_no for fact in detail.facts}
@@ -522,7 +515,7 @@ def _run_recipe_lane(
                 if isinstance(cited, str):
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, cited)
                     continue
-                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today, allowed_states=allowed, adder_evidence=cited)
+                bundle = build_recipe_bundle(item_id, scoped, recipe, priced, dataset, evidence, today=today, allowed_states=allowed, adder_evidence=cited, attributes=attributes)
                 if bundle is None:
                     logger.info("[EVIDENCE] item_id=%s lane=recipe kind=%s skipped=%s", redact(item_id), recipe_kind, "below_threshold")
                     continue
@@ -647,10 +640,12 @@ def _utcnow() -> datetime:
 
 
 def _live_price(fetcher: PublicFetcher, url: str) -> int | None:
+    from urllib.parse import parse_qs
+
     from src.savetax.crosscontract import parse_listing_page
     from src.savetax.danawa import parse_product
     from src.savetax.publicweb import visible_text
-    from src.savetax.shops import parse_shop_product
+    from src.savetax.shops import parse_seller_page
 
     try:
         page = fetcher.get(url)
@@ -669,8 +664,9 @@ def _live_price(fetcher: PublicFetcher, url: str) -> int | None:
         if parsed.hostname == "prod.danawa.com":
             pcode = parse_qs(parsed.query).get("pcode", [""])[0]
             return parse_product(page.text, pcode).low_price_krw
-        product = parse_shop_product(page.text, url)
-        return product.price_krw if product is not None else None
+        raw = page.raw if getattr(page, "raw", b"") else page.text.encode("utf-8")
+        seller = parse_seller_page(raw, url, getattr(page, "content_type", None))
+        return seller.price_krw if seller is not None else None
     except NetworkError:
         raise
     except (SaveTaxError, OSError, ValueError):

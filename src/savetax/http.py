@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import errno
+import gzip
+import io
 import logging
 import socket
 import time
 import urllib.error
 import urllib.request
+import zlib
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
@@ -74,10 +77,11 @@ def urllib_transport(url: str, headers: Mapping[str, str], timeout: float) -> Ht
     started = time.monotonic()
     try:
         with closing(opener.open(request, timeout=timeout)) as response:  # noqa: S310
+            response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
             return HttpResponse(
                 status=int(response.status),
-                headers={str(k).lower(): str(v) for k, v in response.headers.items()},
-                body=_read_body(response.read),
+                headers=response_headers,
+                body=_decode_content(_read_body(response.read), response_headers.get("content-encoding")),
                 elapsed_seconds=time.monotonic() - started,
             )
     except urllib.error.HTTPError as http_err:
@@ -90,6 +94,22 @@ def urllib_transport(url: str, headers: Mapping[str, str], timeout: float) -> Ht
                 body=payload,
                 elapsed_seconds=time.monotonic() - started,
             )
+
+
+_MAX_DECODED_BYTES = 32 * 1024 * 1024
+
+
+def _decode_content(body: bytes, encoding: str | None) -> bytes:
+    # Some shops send gzip bodies even when the request did not offer it; urllib does not undo that.
+    if (encoding or "").strip().lower() != "gzip" and not body.startswith(b"\x1f\x8b"):
+        return body
+    try:
+        decoded = gzip.GzipFile(fileobj=io.BytesIO(body)).read(_MAX_DECODED_BYTES + 1)
+    except (OSError, EOFError, zlib.error):
+        raise DataIntegrityError("[SYS] HTTP response body is not valid gzip") from None
+    if len(decoded) > _MAX_DECODED_BYTES:
+        raise DataIntegrityError("[SYS] HTTP response body exceeds the decoded size limit")
+    return decoded
 
 
 def _read_body(read: Callable[[], bytes]) -> bytes:

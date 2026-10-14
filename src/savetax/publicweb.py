@@ -34,6 +34,8 @@ class PublicPage:
     status: int
     text: str
     fetched_at: datetime
+    raw: bytes = b""
+    content_type: str | None = None
 
 
 def visible_text(html: str) -> str:
@@ -105,13 +107,13 @@ class PublicFetcher:
                 self._sleep(self._config.retry_cooldown_seconds)
         if 300 <= response.status <= 399:
             logger.info("[SYS] public GET host=%s status=%s", host, response.status)
-            return PublicPage(url=url, status=response.status, text="", fetched_at=self._now())
+            return PublicPage(url=url, status=response.status, text="", fetched_at=self._now(), raw=b"", content_type=response.headers.get("content-type"))
         try:
             text = response.body.decode(_response_charset(response.headers.get("content-type", "")), errors="replace")
         except LookupError:
             text = response.body.decode("utf-8", errors="replace")
         logger.info("[SYS] public GET host=%s status=%s", host, response.status)
-        return PublicPage(url=url, status=response.status, text=text, fetched_at=self._now())
+        return PublicPage(url=url, status=response.status, text=text, fetched_at=self._now(), raw=response.body, content_type=response.headers.get("content-type"))
 
     def _pace(self, host: str) -> None:
         interval = self._evidence.public_request_interval_seconds

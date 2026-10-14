@@ -48,6 +48,19 @@ def _mount_proc(attributes: Mapping[str, str]) -> str:
     return "-"
 
 
+def _panel_part_for_mount(parts: Sequence["RecipePart"], want_enclosure: bool) -> RecipePart | None:  # noqa: UP037
+    want = "enclosure" if want_enclosure else "rack"
+    candidates = [p for p in parts if p.key.startswith("panel:") and p.mount_form == want]
+    if candidates:
+        preferred = ("panel:24-enclosure",) if want_enclosure else ("panel:24", "panel:24-rack")
+        for key in preferred:
+            for cand in candidates:
+                if cand.key == key:
+                    return cand
+        return candidates[0]
+    return None
+
+
 def panel_recipe(name: str, attributes: Mapping[str, str], evidence: EvidenceConfig) -> Recipe | str:
     """Map a 24-port CAT.6/6A patch panel to the organizer recipe; returns a reason code otherwise."""
     text = _search_text(name, attributes)
@@ -66,7 +79,10 @@ def panel_recipe(name: str, attributes: Mapping[str, str], evidence: EvidenceCon
     unterminated = _UNTERMINATED_RE.search(text) is not None
     adder_key = "panel:labor-mounted" if unterminated else "panel:labor-terminated"
     floor = evidence.panel_floor_unterminated_krw if unterminated else evidence.panel_floor_krw
-    part = _by_key(evidence.recipe_parts, evidence.panel_part_key)
+    want_enclosure = ("단자함" in text or "함체" in text)
+    part = _panel_part_for_mount(evidence.recipe_parts, want_enclosure)
+    if part is None:
+        return "mount_form_mismatch"
     adder = _adder_by_key(evidence.recipe_adders, adder_key)
     spec_rows = (
         ("포트 수", "24", "24"),

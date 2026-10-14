@@ -1,19 +1,20 @@
-"""Parts-sum recipe lane over Danawa catalogue pages and fixed adders."""
+"""Parts-sum recipe lane over seller product pages and fixed adders."""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
+from urllib.parse import urlparse
 
 from src.savetax.audit import _arithmetic_precision
 from src.savetax.competition import ItemDetail, ItemState
 from src.savetax.config import EvidenceConfig, RecipeAdder, RecipePart
 from src.savetax.danawa import DanawaProduct, MallOffer, parse_product
 from src.savetax.dataset import Dataset
-from src.savetax.errors import DataIntegrityError, DomainValidationError
+from src.savetax.errors import ConfigError, DataIntegrityError, DomainValidationError, NetworkError, SaveTaxError
 from src.savetax.evidence import EvidenceBundle, Lane, LineProposal, PriceEvidence, RejectedFact, make_line
 from src.savetax.publicweb import PublicFetcher
 from src.savetax.redaction import redact
@@ -21,7 +22,7 @@ from src.savetax.units import normalize_unit
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["PricedPart", "Recipe", "adder_page_amount", "build_recipe_bundle", "price_adders", "price_parts", "recipe_benchmark"]
+__all__ = ["PricedPart", "Recipe", "adder_page_amount", "build_recipe_bundle", "mount_form_gate", "price_adders", "price_parts", "recipe_benchmark"]
 
 _SENTENCES = (
     "조달 전용 모델이나 상표만 바꾼 수입품, 단종 제품처럼 같은 모델을 시중에서 구할 수 없을 때는 동급 제품의 실제 판매가와 비교합니다",
@@ -53,13 +54,15 @@ class Recipe:
 
 @dataclass(frozen=True)
 class PricedPart:
-    """One reference part with its catalogue unit price and citation."""
+    """One reference part with its seller-page unit price and citation."""
 
     part: RecipePart
     quantity: int
     unit_price_krw: int
     observed_price_krw: int
     evidence: PriceEvidence
+    second_unit_price_krw: int | None = None
+    second_evidence: PriceEvidence | None = None
 
 
 _QUOTE_SPEC_CHARS = 400
@@ -148,6 +151,7 @@ def adder_page_amount(page_text: str, amount_krw: int) -> str | None:
 _ADDER_STANDARD_MARK = "표준품셈"
 _ADDER_PHRASE_LIMIT = 300
 _NOTE_LIMIT = 500
+_MAX_PRICE_EVIDENCE = 8
 
 
 def _amount_phrase(norm: str, start: int, end: int) -> str:
@@ -199,61 +203,215 @@ def _sourced_eligible(recipe: Recipe) -> bool:
     )
 
 
+def _seller_quote(title: str, price: int, host: str, today: date) -> str:
+    return f"{title} / 판매가 {price:,}원 / {host} 상품 페이지, {today} 확인"
+
+
+def _seller_note(part: RecipePart, quantity: int, recipe: Recipe) -> str:
+    if recipe.exact_sum:
+        return f"{part.label} {quantity}개 반영. 비교 단가 = {recipe.sum_label}"[:500]
+    labels = " + ".join(a.label for a in recipe.adders)
+    base = f"{part.label} {quantity}개 반영. 비교 단가 = 부품 합계 + {labels}" if labels else f"{part.label} {quantity}개 반영"
+    return base[:500]
+
+
+def _price_seller_part(
+    part: RecipePart,
+    quantity: int,
+    recipe: Recipe,
+    fetcher: PublicFetcher,
+    today: date,
+    cache: dict[str, object],
+) -> PricedPart | str:
+    from src.savetax.shops import ShopProduct, parse_seller_page
+
+    readable: list[tuple[int, str, ShopProduct]] = []
+    saw_sold_out = False
+    saw_mismatch = False
+    for url in part.sources:
+        cached = cache.get(url)
+        if isinstance(cached, str):
+            if cached == "sold_out":
+                saw_sold_out = True
+            elif cached == "mismatch":
+                saw_mismatch = True
+            continue
+        product: ShopProduct | None = cached if isinstance(cached, ShopProduct) else None
+        if product is None:
+            try:
+                page = fetcher.get(url)
+            except (ConfigError, NetworkError):
+                raise
+            except SaveTaxError:
+                continue
+            except (OSError, ValueError):
+                continue
+            if page.status != 200 or not page.text:
+                cache[url] = "unreadable"
+                continue
+            raw = page.raw if getattr(page, "raw", b"") else page.text.encode("utf-8")
+            content_type = getattr(page, "content_type", None)
+            try:
+                parsed = parse_seller_page(raw, url, content_type)
+            except (ValueError, OSError):
+                cache[url] = "unreadable"
+                continue
+            if parsed is None:
+                from src.savetax.shops import _decode_seller_page
+
+                lowered = _decode_seller_page(raw, content_type)
+                if any(marker in lowered for marker in ("품절", "판매종료", "일시품절")):
+                    saw_sold_out = True
+                    cache[url] = "sold_out"
+                else:
+                    cache[url] = "unreadable"
+                continue
+            flat = _compact_name(parsed.title or "")
+            if any(_compact_name(token) not in flat for token in part.name_tokens):
+                saw_mismatch = True
+                continue
+            cache[url] = parsed
+            product = parsed
+        else:
+            flat = _compact_name(product.title or "")
+            if any(_compact_name(token) not in flat for token in part.name_tokens):
+                saw_mismatch = True
+                continue
+        assert product is not None
+        readable.append((product.price_krw, url, product))
+    if not readable:
+        if saw_sold_out:
+            return f"part_sold_out:{part.key}"
+        if saw_mismatch:
+            return f"part_name_mismatch:{part.key}"
+        return f"part_page_unreadable:{part.key}"
+    readable.sort(key=lambda item: (item[0], item[1]))
+    chosen_price, chosen_url, chosen_product = readable[0]
+    chosen_host = (urlparse(chosen_url).hostname or "").lower()
+    second: tuple[int, str, ShopProduct] | None = None
+    for price, url, product in readable[1:]:
+        if (urlparse(url).hostname or "").lower().removeprefix("www.") != chosen_host.removeprefix("www."):
+            second = (price, url, product)
+            break
+    try:
+        proof = PriceEvidence(
+            source_url=chosen_url,
+            quote=_seller_quote(chosen_product.title, chosen_price, chosen_host, today),
+            observed_price_krw=chosen_price,
+            observed_at=today,
+            vat_included=True,
+            shipping_included=False,
+            note=_seller_note(part, quantity, recipe),
+        )
+        second_evidence: PriceEvidence | None = None
+        second_price: int | None = None
+        if second is not None:
+            second_price, second_url, second_product = second
+            second_host = (urlparse(second_url).hostname or "").lower()
+            second_evidence = PriceEvidence(
+                source_url=second_url,
+                quote=_seller_quote(second_product.title, second_price, second_host, today),
+                observed_price_krw=second_price,
+                observed_at=today,
+                vat_included=True,
+                shipping_included=False,
+                note=_seller_note(part, quantity, recipe),
+            )
+    except DomainValidationError:
+        return f"part_page_unreadable:{part.key}"
+    return PricedPart(part, quantity, chosen_price, chosen_price, proof, second_price, second_evidence)
+
+
+def _price_legacy_part(
+    part: RecipePart,
+    quantity: int,
+    recipe: Recipe,
+    fetcher: PublicFetcher,
+    evidence: EvidenceConfig,
+    today: date,
+    cache: dict[str, object],
+) -> PricedPart | str:
+    url = evidence.danawa_product_url_template.format(pcode=part.pcode)
+    cached = cache.get(part.pcode)
+    if isinstance(cached, str):
+        return cached
+    product: DanawaProduct | None = cached if isinstance(cached, DanawaProduct) else None
+    if product is None:
+        page = fetcher.get(url)
+        if page.status != 200:
+            reason = f"part_page_unreadable:{part.key}"
+            cache[part.pcode] = reason
+            return reason
+        try:
+            product = parse_product(page.text, part.pcode)
+        except (DataIntegrityError, DomainValidationError, ValueError):
+            reason = f"part_page_unreadable:{part.key}"
+            cache[part.pcode] = reason
+            return reason
+        cache[part.pcode] = product
+    assert product is not None
+    if product.low_price_krw is None:
+        return f"part_not_on_sale:{part.key}"
+    if _offer_count(product) < evidence.recipe_min_offers:
+        return f"part_offers_low:{part.key}"
+    flat = _compact_name(product.name or "")
+    if any(_compact_name(token) not in flat for token in part.name_tokens):
+        return f"part_identity_mismatch:{part.key}"
+    chosen = _chosen_price(product, evidence)
+    base = product.low_price_krw if chosen is None else max(product.low_price_krw, chosen)
+    if (recipe.exact_sum or _sourced_eligible(recipe)) and base != int(product.low_price_krw):
+        return f"part_price_unstable:{part.key}"
+    try:
+        proof = PriceEvidence(
+            source_url=url,
+            quote=_quote(part, product, today),
+            observed_price_krw=int(product.low_price_krw),
+            observed_at=today,
+            vat_included=True,
+            shipping_included=False,
+            note=(f"{part.label} {quantity}개 반영. 비교 단가 = {recipe.sum_label}" if recipe.exact_sum else _note(part, quantity, recipe.adders, product, evidence)),
+        )
+    except DomainValidationError:
+        return f"part_page_unreadable:{part.key}"
+    return PricedPart(part, quantity, base, int(product.low_price_krw), proof)
+
+
+def mount_form_gate(recipe: Recipe, procured_text: str) -> str | None:
+    """Return mount_form_mismatch when the recipe panel form does not fit the procured mount, else None."""
+    forms = {part.mount_form for part, _ in recipe.parts if part.mount_form is not None}
+    if not forms:
+        return None
+    enclosure = ("단자함" in procured_text or "함체" in procured_text)
+    if enclosure:
+        return None if "enclosure" in forms and "rack" not in forms else "mount_form_mismatch"
+    return None if "rack" in forms and "enclosure" not in forms else "mount_form_mismatch"
+
+
 def price_parts(
     recipe: Recipe,
     fetcher: PublicFetcher,
     evidence: EvidenceConfig,
     today: date,
-    cache: dict[str, DanawaProduct | str],
+    cache: dict[str, object],
 ) -> tuple[PricedPart, ...] | str:
-    """Price every part from its Danawa catalogue page; returns a reason code when any part cannot be priced."""
-    if not recipe.parts or len(recipe.parts) > 8:
+    """Price every part from its seller page; returns a reason code when any part cannot be priced."""
+    # One seller part past the citation cap may ride uncited in B (see build_recipe_bundle); more would leave too much
+    # of B outside the evidence objects.
+    if not recipe.parts or len(recipe.parts) > _MAX_PRICE_EVIDENCE + 1:
         return "recipe_part_count"
     priced: list[PricedPart] = []
     for part, quantity in recipe.parts:
-        url = evidence.danawa_product_url_template.format(pcode=part.pcode)
-        cached = cache.get(part.pcode)
-        if isinstance(cached, str):
-            return cached
-        product: DanawaProduct | None = cached if isinstance(cached, DanawaProduct) else None
-        if product is None:
-            page = fetcher.get(url)
-            if page.status != 200:
-                reason = f"part_page_unreadable:{part.key}"
-                cache[part.pcode] = reason
-                return reason
-            try:
-                product = parse_product(page.text, part.pcode)
-            except (DataIntegrityError, DomainValidationError, ValueError):
-                reason = f"part_page_unreadable:{part.key}"
-                cache[part.pcode] = reason
-                return reason
-            cache[part.pcode] = product
-        assert product is not None
-        if product.low_price_krw is None:
-            return f"part_not_on_sale:{part.key}"
-        if _offer_count(product) < evidence.recipe_min_offers:
-            return f"part_offers_low:{part.key}"
-        flat = _compact_name(product.name or "")
-        if any(_compact_name(token) not in flat for token in part.name_tokens):
-            return f"part_identity_mismatch:{part.key}"
-        chosen = _chosen_price(product, evidence)
-        base = product.low_price_krw if chosen is None else max(product.low_price_krw, chosen)
-        if (recipe.exact_sum or _sourced_eligible(recipe)) and base != int(product.low_price_krw):
-            return f"part_price_unstable:{part.key}"
-        try:
-            proof = PriceEvidence(
-                source_url=url,
-                quote=_quote(part, product, today),
-                observed_price_krw=int(product.low_price_krw),
-                observed_at=today,
-                vat_included=True,
-                shipping_included=False,
-                note=(f"{part.label} {quantity}개 반영. 비교 단가 = {recipe.sum_label}" if recipe.exact_sum else _note(part, quantity, recipe.adders, product, evidence)),
-            )
-        except DomainValidationError:
+        if part.sources_pending:
+            return f"part_sources_pending:{part.key}"
+        if part.sources:
+            out = _price_seller_part(part, quantity, recipe, fetcher, today, cache)
+        elif part.pcode:
+            out = _price_legacy_part(part, quantity, recipe, fetcher, evidence, today, cache)
+        else:
             return f"part_page_unreadable:{part.key}"
-        priced.append(PricedPart(part, quantity, base, int(product.low_price_krw), proof))
+        if isinstance(out, str):
+            return out
+        priced.append(out)
     return tuple(priced)
 
 
@@ -398,6 +556,31 @@ def _sourced_claim(
     return text
 
 
+def _second_benchmark(
+    priced: Sequence[PricedPart],
+    adders: Sequence["RecipeAdder"],  # noqa: UP037
+    floor_krw: int | None,
+) -> int | None:
+    if not priced or any(p.second_unit_price_krw is None for p in priced):
+        return None
+    if any(type(p.second_unit_price_krw) is not int or int(p.second_unit_price_krw or 0) <= 0 for p in priced):
+        return None
+    if any(
+        p.second_evidence is None
+        or p.second_evidence.observed_price_krw != p.second_unit_price_krw
+        or (bool(p.part.sources) and p.second_evidence.source_url not in p.part.sources)
+        or int(p.second_unit_price_krw or 0) < p.unit_price_krw
+        or (urlparse(p.second_evidence.source_url).hostname or "").removeprefix("www.")
+        == (urlparse(p.evidence.source_url).hostname or "").removeprefix("www.")
+        for p in priced
+    ):
+        return None
+    total = sum(int(p.second_unit_price_krw or 0) * p.quantity for p in priced) + sum(a.amount_krw for a in adders)
+    if floor_krw is not None and total < floor_krw:
+        return floor_krw
+    return total
+
+
 def build_recipe_bundle(
     item_id: str,
     detail: ItemDetail,
@@ -409,6 +592,7 @@ def build_recipe_bundle(
     today: date,
     allowed_states: frozenset[ItemState] = frozenset({ItemState.AVAILABLE}),
     adder_evidence: Sequence[PriceEvidence] = (),
+    attributes: Mapping[str, str] | None = None,
 ) -> EvidenceBundle | None:
     """Return the recipe-lane bundle for one item, or None when no line reaches the markup threshold."""
     _ = dataset
@@ -416,7 +600,22 @@ def build_recipe_bundle(
         raise DataIntegrityError("[DATA] item detail identity mismatch")
     if detail.state not in allowed_states:
         return None
+    procured_text = detail.name or ""
+    if attributes:
+        procured_text += " " + " ".join(str(v) for v in attributes.values())
+    if mount_form_gate(recipe, procured_text) == "mount_form_mismatch":
+        return None
     sourced = _fully_sourced(recipe, adder_evidence)
+    seller_lane = bool(priced) and all(bool(p.part.sources) for p in priced)
+    if seller_lane and recipe.adders and not sourced:
+        raise DomainValidationError("[DATA] seller recipe adders require matching page evidence")
+    if seller_lane and any(
+        p.evidence.source_url not in p.part.sources
+        or p.unit_price_krw != p.observed_price_krw
+        or p.observed_price_krw != p.evidence.observed_price_krw
+        for p in priced
+    ):
+        raise DomainValidationError("[DATA] seller recipe prices differ from observed evidence")
     if recipe.exact_sum:
         if recipe.adders or recipe.floor_krw is not None:
             raise DomainValidationError("[DATA] exact-sum recipe carries an adder or floor")
@@ -457,10 +656,21 @@ def build_recipe_bundle(
         noted(e, f"{a.label}: 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임")
         for a, e in zip(sourced_adders, adder_evidence, strict=False)
     )
-    evidences = part_evidences + adder_evidences
+    # The schema caps price_evidence at eight. Past the cap the smallest components stay in B without an evidence
+    # object: that only raises B, so the declared saving stays below what the cited prices alone would give, and the
+    # claim names each uncited amount with its public source.
+    candidates = [(e, p.part.label) for p, e in zip(priced, part_evidences, strict=True)] + [
+        (e, a.label) for a, e in zip(sourced_adders, adder_evidences, strict=False)
+    ]
+    by_size = sorted(range(len(candidates)), key=lambda i: candidates[i][0].observed_price_krw, reverse=True)
+    cited_idx = sorted(by_size[:_MAX_PRICE_EVIDENCE])
+    uncited = [candidates[i] for i in sorted(by_size[_MAX_PRICE_EVIDENCE:])]
+    evidences = tuple(candidates[i][0] for i in cited_idx)
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []
-    gate_base = benchmark if recipe.floor_krw is None else max(benchmark, recipe.floor_krw)
+    gate_base = benchmark if seller_lane or recipe.floor_krw is None else max(benchmark, recipe.floor_krw)
+    second_benchmark = _second_benchmark(priced, recipe.adders, None if seller_lane else recipe.floor_krw)
+    band_dropped = 0
     for fact in detail.facts:
         if not fact.scorable:
             rejected.append(RejectedFact(fact.fact_id, "not_scorable"))
@@ -488,6 +698,21 @@ def build_recipe_bundle(
             if below_threshold:
                 rejected.append(RejectedFact(fact.fact_id, "below_threshold"))
                 continue
+        with localcontext() as context:
+            context.prec = _arithmetic_precision(evidence.recipe_band_upper, Decimal(benchmark))
+            in_band = seller_lane and fact.unit_price_krw < evidence.recipe_band_upper * Decimal(benchmark)
+        if in_band:
+            if second_benchmark is None:
+                rejected.append(RejectedFact(fact.fact_id, "band_single_seller"))
+                band_dropped += 1
+                continue
+            with localcontext() as context:
+                context.prec = _arithmetic_precision(evidence.recipe_markup_threshold, Decimal(second_benchmark))
+                below_second = fact.unit_price_krw < evidence.recipe_markup_threshold * Decimal(second_benchmark)
+            if below_second:
+                rejected.append(RejectedFact(fact.fact_id, "band_second_seller"))
+                band_dropped += 1
+                continue
         try:
             lines.append(make_line(fact, Decimal(benchmark), evidences))
         except DomainValidationError:
@@ -500,13 +725,23 @@ def build_recipe_bundle(
         return None
     best = max(line.fact_unit_price_krw / line.benchmark_unit_price_krw for line in lines)
     if sourced:
-        gate_filtered = any(r.reason == "below_floor_gate" for r in rejected)
+        # Seller recipes gate on B itself (no organizer floor), so the floor sentence would misstate the rule.
+        gate_filtered = not seller_lane and any(r.reason == "below_floor_gate" for r in rejected)
         claim = _sourced_claim(item_id, priced, recipe.adders, benchmark, len(lines), gate_filtered, evidence)
     else:
         raised = recipe.floor_krw is not None and benchmark == recipe.floor_krw and (
             sum(p.unit_price_krw * p.quantity for p in priced) + sum(a.amount_krw for a in recipe.adders) < recipe.floor_krw
         )
         claim = _claim(item_id, priced, recipe.adders, benchmark, recipe.floor_krw, raised, len(lines), recipe.sum_label, recipe.exact_sum)
+    if second_benchmark is not None:
+        claim += f" 두 번째 판매처 기준 비교 단가 {second_benchmark:,}원."
+    if band_dropped:
+        claim += f" 1.2배 이상 1.3배 미만 납품요구 {band_dropped}건은 두 번째 판매처 기준을 넘지 못해 넣지 않았다."
+    for cited_ev, label in uncited:
+        claim += (
+            f" {label} {cited_ev.observed_price_krw:,}원은 가격 근거 개수 한도(8개) 때문에 근거 객체 없이 비교 단가에 더했다"
+            f"(출처 {cited_ev.source_url}). 이 금액만큼 신고 절감액이 근거 가격만으로 계산한 값보다 작다."
+        )
     if len(claim) > 2000:
         raise DomainValidationError("[DATA] recipe claim exceeds text limit")
     bundle = EvidenceBundle(

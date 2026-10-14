@@ -188,8 +188,8 @@ def test_not_on_sale_and_unreadable_fail_closed() -> None:
     assert out3 == "part_page_unreadable:cpu:T"
 
 
-def test_nine_parts_refused_and_cached_page_fetched_once() -> None:
-    parts = tuple((_part(f"k{i}", "CPU", str(100 + i), ("울트라5",)), 1) for i in range(9))
+def test_ten_parts_refused_and_cached_page_fetched_once() -> None:
+    parts = tuple((_part(f"k{i}", "CPU", str(100 + i), ("울트라5",)), 1) for i in range(10))
     assert price_parts(_recipe(parts=parts), _fetcher({}, []), _evidence(), _TODAY, {}) == "recipe_part_count"
     assert price_parts(_recipe(parts=()), _fetcher({}, []), _evidence(), _TODAY, {}) == "recipe_part_count"
     html = _product_html("울트라5 225 정품", low=100, count=3)
@@ -287,7 +287,7 @@ def test_floor_raise_sentence_and_bundle_round_trip(tmp_path) -> None:
     assert loaded["I1"].lines == bundle.lines
 
 
-def test_panel_benchmark_raised_to_floor() -> None:
+def test_panel_seller_recipe_uses_cited_labour_without_floor_raise() -> None:
     from src.savetax.evidence import PriceEvidence
     from src.savetax.fixturerecipe import panel_recipe
 
@@ -295,13 +295,16 @@ def test_panel_benchmark_raised_to_floor() -> None:
     recipe = panel_recipe("패치판넬 CAT.6 24PORT", {}, evidence)
     assert not isinstance(recipe, str)
     part, quantity = recipe.parts[0]
-    proof = PriceEvidence(evidence.danawa_product_url_template.format(pcode=part.pcode),
-                          "24포트 패치판넬 실제 판매가 62,200원", 62200, _TODAY, True, False)
+    proof = PriceEvidence(part.sources[0], "IN-50U6A24P 24포트 / 판매가 62,200원", 62200, _TODAY, True, False)
     priced = (PricedPart(part, quantity, 62200, 62200, proof),)
-    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="1000000"),)), recipe, priced, _Ds(), evidence, today=_TODAY)
+    labour = tuple(
+        PriceEvidence(a.source_url, f"공임 {a.amount_krw:,}원", a.amount_krw, _TODAY, True, False)
+        for a in recipe.adders if a.source_url is not None
+    )
+    bundle = build_recipe_bundle("I1", _detail((_fact(unit_price="1000000"),)), recipe, priced, _Ds(), evidence, today=_TODAY, adder_evidence=labour)
     assert bundle is not None
-    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(467649)
-    assert "그 값으로 올림 = 467,649원" in bundle.claim
+    assert bundle.lines[0].benchmark_unit_price_krw == Decimal(62200 + sum(e.observed_price_krw for e in labour))
+    assert "올림" not in bundle.claim
 
 
 def test_rack_benchmark_above_floor_kept() -> None:
@@ -554,3 +557,258 @@ def test_non_exact_without_adders_preserves_claim_arithmetic() -> None:
                                 (_priced(),), _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY)
     assert bundle is not None
     assert "부품 합계 100원 = 100원." in bundle.claim
+
+
+def _seller_fetcher(pages: dict[str, tuple[int, bytes, str | None]]) -> PublicFetcher:
+    def transport(url: str, headers: object, timeout: float) -> HttpResponse:
+        if url in pages:
+            status, body, ctype = pages[url]
+            headers_out = {"content-type": ctype} if ctype else {}
+            return HttpResponse(status=status, headers=headers_out, body=body, elapsed_seconds=0.01)
+        return HttpResponse(status=404, headers={}, body=b"", elapsed_seconds=0.01)
+
+    return PublicFetcher(SaveTaxConfig(), EvidenceConfig(), transport=transport)  # type: ignore[arg-type]
+
+
+def _seller_html(title: str, price: int) -> bytes:
+    return f"<html><head><title>{title}</title></head><body><p>판매가 {price:,}원</p></body></html>".encode()
+
+
+def _seller_part(key: str = "cpu:T", urls: tuple[str, ...] = ("https://compuzone.co.kr/p1", "https://cynexpc.com/p1")) -> RecipePart:
+    from src.savetax.config import DEFAULT_EVIDENCE_HOSTS
+
+    hosts = tuple(u.split("/")[2] for u in urls)
+    missing = [h for h in hosts if h not in DEFAULT_EVIDENCE_HOSTS]
+    assert not missing, f"test hosts must be seller hosts: {missing}"
+    return RecipePart(key, "CPU", urls, ("울트라5", "225"))
+
+
+def _seller_recipe(part: RecipePart) -> Recipe:
+    return Recipe(kind="desktop", parts=((part, 1),), adders=(), spec_rows=(("CPU", "a", "b"),),
+                  differences=(), review_required=False, precedent_urls=("https://savetax.now/505",),
+                  title_phrase="동급 사양 부품 합산가")
+
+
+def test_danawa_source_rejected() -> None:
+    from src.savetax.errors import ConfigError
+
+    with pytest.raises(ConfigError):
+        _evidence(recipe_parts=(RecipePart("k", "L", ("https://prod.danawa.com/info/?pcode=123",), ("A",)),))
+
+
+def test_seller_page_part_priced() -> None:
+    part = _seller_part()
+    u1, u2 = part.sources
+    fetcher = _seller_fetcher({u1: (200, _seller_html("울트라5 225 정품 팝니다", 88000), "text/html; charset=utf-8"),
+                               u2: (200, _seller_html("울트라5 225 정품 팝니다", 90000), None)})
+    recipe = _seller_recipe(part)
+    priced = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert not isinstance(priced, str)
+    quote = priced[0].evidence.quote
+    assert "울트라5 225 정품 팝니다" in quote
+    assert "판매가 88,000원" in quote
+    assert "compuzone.co.kr" in quote
+    assert str(_TODAY) in quote
+    assert "동급" not in quote
+
+
+def test_band_line_kept_on_second_seller() -> None:
+    part = _seller_part()
+    u1, u2 = part.sources
+    fetcher = _seller_fetcher({u1: (200, _seller_html("울트라5 225 정품", 1000), None),
+                               u2: (200, _seller_html("울트라5 225 정품", 1040), None)})
+    recipe = _seller_recipe(part)
+    priced = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert not isinstance(priced, str)
+    ev = _evidence(recipe_markup_threshold=Decimal("1.20"), min_item_expected_krw=0)
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "1250"),)), recipe, priced, _Ds(), ev, today=_TODAY)
+    assert bundle is not None
+    assert len(bundle.lines) == 1
+    assert "두 번째 판매처 기준 비교 단가 1,040원" in bundle.claim
+
+
+def test_band_line_dropped_on_second_seller() -> None:
+    part = _seller_part()
+    u1, u2 = part.sources
+    fetcher = _seller_fetcher({u1: (200, _seller_html("울트라5 225 정품", 1000), None),
+                               u2: (200, _seller_html("울트라5 225 정품", 1050), None)})
+    recipe = _seller_recipe(part)
+    priced = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert not isinstance(priced, str)
+    ev = _evidence(recipe_markup_threshold=Decimal("1.20"), min_item_expected_krw=0)
+    detail = _detail((_fact("f1", "1250"), _fact("f2", "2000", request_no="R2", line_no="2")))
+    bundle = build_recipe_bundle("I1", detail, recipe, priced, _Ds(), ev, today=_TODAY)
+    assert bundle is not None
+    assert [line.fact_id for line in bundle.lines] == ["f2"]
+    assert any(r.reason == "band_second_seller" for r in bundle.rejected)
+    assert "두 번째 판매처 기준 비교 단가 1,050원" in bundle.claim
+    assert "넣지 않았다" in bundle.claim
+
+
+def test_band_line_dropped_without_second_host() -> None:
+    part = _seller_part(urls=("https://compuzone.co.kr/p1",))
+    fetcher = _seller_fetcher({"https://compuzone.co.kr/p1": (200, _seller_html("울트라5 225 정품", 1000), None)})
+    recipe = _seller_recipe(part)
+    priced = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert not isinstance(priced, str)
+    ev = _evidence(recipe_markup_threshold=Decimal("1.20"), min_item_expected_krw=0)
+    detail = _detail((_fact("f1", "1250"), _fact("f2", "2000", request_no="R2", line_no="2")))
+    bundle = build_recipe_bundle("I1", detail, recipe, priced, _Ds(), ev, today=_TODAY)
+    assert bundle is not None
+    assert [line.fact_id for line in bundle.lines] == ["f2"]
+    assert any(r.reason == "band_single_seller" for r in bundle.rejected)
+
+
+def test_line_above_band_needs_no_second_seller() -> None:
+    part = _seller_part(urls=("https://compuzone.co.kr/p1",))
+    fetcher = _seller_fetcher({"https://compuzone.co.kr/p1": (200, _seller_html("울트라5 225 정품", 1000), None)})
+    recipe = _seller_recipe(part)
+    priced = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert not isinstance(priced, str)
+    ev = _evidence(recipe_markup_threshold=Decimal("1.20"), min_item_expected_krw=0)
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "1350"),)), recipe, priced, _Ds(), ev, today=_TODAY)
+    assert bundle is not None
+    assert len(bundle.lines) == 1
+
+
+def test_enclosure_item_rejects_rack_panel() -> None:
+    from src.savetax.recipe import mount_form_gate
+
+    rack = RecipePart("panel:24-rack", "패널", ("https://fibermart.co.kr/r1",), ("24포트",), "rack")
+    recipe = Recipe(kind="panel", parts=((rack, 1),), adders=(), spec_rows=(), differences=(),
+                    review_required=False, precedent_urls=(), title_phrase="패널")
+    assert mount_form_gate(recipe, "함체형 단자함 패치판넬 24포트") == "mount_form_mismatch"
+    bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), recipe, (_priced(),),
+                                 _Ds(), _evidence(min_item_expected_krw=0), today=_TODAY,
+                                 attributes={"취부형태": "함체형"})
+    assert bundle is None
+
+
+def test_assembly_adder_sourced() -> None:
+    from src.savetax.recipe import price_adders
+
+    adder = next(a for a in EvidenceConfig().recipe_adders if a.key == "desktop:assembly")
+    assert adder.source_url is not None
+    recipe = _recipe(parts=((_part(), 1),), adders=(adder,))
+    fetcher = _seller_fetcher({adder.source_url: (200, "조립 25,000원 표준품셈 안내".encode(), None)})
+    cited = price_adders(recipe, fetcher, _TODAY)
+    assert not isinstance(cited, str)
+    assert cited[0].observed_price_krw == 25000
+
+
+def test_seller_exact_sum_note_and_cached_product_reused() -> None:
+    part = _seller_part()
+    u1, _u2 = part.sources
+    fetcher = _seller_fetcher({u1: (200, _seller_html("울트라5 225 정품", 1000), None),
+                               part.sources[1]: (404, b"", None)})
+    recipe = Recipe(kind="desktop", parts=((part, 1),), adders=(), spec_rows=(), differences=(),
+                    review_required=False, precedent_urls=(), title_phrase="T",
+                    sum_label="판매가 합계", exact_sum=True)
+    cache: dict = {}
+    first = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, cache)
+    assert not isinstance(first, str)
+    assert "판매가 합계" in (first[0].evidence.note or "")
+    second = price_parts(recipe, fetcher, _evidence(min_item_expected_krw=0), _TODAY, cache)
+    assert not isinstance(second, str)
+    assert second[0].unit_price_krw == 1000
+
+
+def test_seller_fetcher_errors_fail_closed() -> None:
+    from src.savetax.errors import ConfigError, SaveTaxError
+
+    part = _seller_part()
+    u1, u2 = part.sources
+
+    class _ErrFetcher:
+        def get(self, url: str) -> object:
+            if url == u1:
+                raise SaveTaxError("boom")
+            raise OSError("down")
+
+    recipe = _seller_recipe(part)
+    out = price_parts(recipe, _ErrFetcher(), _evidence(min_item_expected_krw=0), _TODAY, {})  # type: ignore[arg-type]
+    assert out == f"part_page_unreadable:{part.key}"
+    out2 = price_parts(recipe, _seller_fetcher({}), _evidence(min_item_expected_krw=0), _TODAY,
+                       {u1: "sold_out", u2: "mismatch"})
+    assert out2 == f"part_sold_out:{part.key}"
+    out3 = price_parts(recipe, _seller_fetcher({}), _evidence(min_item_expected_krw=0), _TODAY, {u1: "mismatch"})
+    assert out3 == f"part_name_mismatch:{part.key}"
+
+    class _CfgFetcher:
+        def get(self, url: str) -> object:
+            raise ConfigError("[SYS] refusing public URL outside the allowlist")
+
+    with pytest.raises(ConfigError):
+        price_parts(recipe, _CfgFetcher(), _evidence(min_item_expected_krw=0), _TODAY, {})  # type: ignore[arg-type]
+
+
+def test_seller_live_sold_out_mismatch_and_unreadable() -> None:
+    part = _seller_part()
+    u1, u2 = part.sources
+    sold = "<html><head><title>울트라5 225 정품</title></head><body><p>판매가 1000원</p><p>품절</p></body></html>".encode()
+    out = price_parts(_seller_recipe(part), _seller_fetcher({u1: (200, sold, None), u2: (404, b"", None)}),
+                      _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert out == f"part_sold_out:{part.key}"
+    wrong = _seller_html("전혀 다른 제품", 1000)
+    out2 = price_parts(_seller_recipe(part), _seller_fetcher({u1: (200, wrong, None), u2: (404, b"", None)}),
+                       _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert out2 == f"part_name_mismatch:{part.key}"
+    out3 = price_parts(_seller_recipe(part), _seller_fetcher({u1: (200, b"<title>x</title>", None)}),
+                       _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert out3 == f"part_page_unreadable:{part.key}"
+
+
+def test_seller_parse_error_is_unreadable(monkeypatch) -> None:
+    import src.savetax.recipe as _recipe_mod
+
+    part = _seller_part()
+    u1, _u2 = part.sources
+    fetcher = _seller_fetcher({u1: (200, _seller_html("울트라5 225 정품", 1000), None)})
+
+    def _boom(raw: bytes, url: str, ctype: str | None):  # type: ignore[no-untyped-def]
+        raise ValueError("bad page")
+
+    monkeypatch.setattr(_recipe_mod, "parse_seller_page", _boom, raising=False)
+    import src.savetax.shops as _shops
+
+    monkeypatch.setattr(_shops, "parse_seller_page", _boom, raising=True)
+    out = price_parts(_seller_recipe(part), fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert out == f"part_page_unreadable:{part.key}"
+
+
+def test_seller_cached_product_name_mismatch() -> None:
+    from src.savetax.shops import ShopProduct
+
+    part = _seller_part()
+    u1, u2 = part.sources
+    bad = ShopProduct(url=u1, title="전혀 다른 제품", price_krw=1000)
+    good_html = _seller_html("울트라5 225 정품", 1000)
+    cache: dict = {u1: bad}
+    out = price_parts(_seller_recipe(part), _seller_fetcher({u2: (200, good_html, None)}),
+                      _evidence(min_item_expected_krw=0), _TODAY, cache)
+    assert not isinstance(out, str)
+    assert out[0].unit_price_krw == 1000
+    cache2: dict = {u1: bad}
+    out2 = price_parts(_seller_recipe(part), _seller_fetcher({}), _evidence(min_item_expected_krw=0), _TODAY, cache2)
+    assert out2 == f"part_name_mismatch:{part.key}"
+
+
+def test_seller_evidence_too_long_is_unreadable() -> None:
+    part = _seller_part()
+    u1, u2 = part.sources
+    long_title = "울트라5 225 " + "가" * 3000
+    fetcher = _seller_fetcher({u1: (200, _seller_html(long_title, 1000), None),
+                               u2: (404, b"", None)})
+    out = price_parts(_seller_recipe(part), fetcher, _evidence(min_item_expected_krw=0), _TODAY, {})
+    assert out == f"part_page_unreadable:{part.key}"
+
+
+def test_second_benchmark_rejects_bad_second_price() -> None:
+    from dataclasses import replace
+
+    from src.savetax.recipe import _second_benchmark
+
+    base = _priced()
+    bad = replace(base, second_unit_price_krw=0, second_evidence=None)
+    assert _second_benchmark((bad,), (), None) is None
+    assert _second_benchmark((), (), None) is None
