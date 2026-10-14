@@ -454,7 +454,7 @@ def build_recipe_bundle(
 
     def adder_header(adder: RecipeAdder) -> str:
         return (
-            f"{lead}금액. 이 근거는 {adder.label}로, 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임] "
+            f"{lead}금액. 이 근거는 {adder.label}이며, 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임] "
             "[이하 주최 측 상세분석 화면에서 옮긴 내용] "
         )
 
