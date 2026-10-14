@@ -443,12 +443,14 @@ def build_recipe_bundle(
         expression = _sourced_sum_expression(priced, recipe.adders)
     else:
         expression = _sum_expression(priced) if recipe.exact_sum else ""
+    # Organizer docs ask quotes to carry only visible page text; the lint still needs the equivalence and the sum,
+    # so that explanation is labelled as the submitter's note and kept apart from the transcribed page text.
     lead = (
-        f"[조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품의 가격 근거. "
-        f"비교 단가 {benchmark:,}원{expression}의 구성 요소 "
+        f"[제출자 설명(화면 문구 아님): 조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 "
+        f"동급 대체품의 가격 근거. 비교 단가 {benchmark:,}원{expression}의 구성 요소 "
     )
-    header = lead + "가격으로, 아래는 그 판매 화면에서 본 내용] "
-    adder_header = lead + "금액으로, 아래는 주최 측 상세분석 화면에서 본 내용] "
+    header = lead + "가격] [이하 판매 화면에서 옮긴 내용] "
+    adder_header = lead + "금액] [이하 주최 측 상세분석 화면에서 옮긴 내용] "
     if recipe.exact_sum:
         evidences = tuple(replace(p.evidence, quote=(header + p.evidence.quote)[:2000]) for p in priced)
     else:

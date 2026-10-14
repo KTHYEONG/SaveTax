@@ -461,7 +461,7 @@ def test_quote_names_the_procurement_item_and_the_equivalence() -> None:
     bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), _recipe(), (_priced(),), _Ds(), ev, today=_TODAY)  # type: ignore[arg-type]
     assert bundle is not None
     for cited in bundle.lines[0].price_evidence:
-        assert cited.quote.startswith("[조달 물품 「")
+        assert cited.quote.startswith("[제출자 설명(화면 문구 아님): 조달 물품 「")
         assert "I1" in cited.quote
         assert "동급 대체품" in cited.quote
         assert len(cited.quote) <= 2000
