@@ -465,11 +465,11 @@ DEFAULT_RECIPE_PARTS: tuple["RecipePart", ...] = (  # noqa: UP037
     RecipePart("panel:24", "24포트 패치판넬(CAT.6A)", ("https://www.compuzone.co.kr/product/product_detail.htm?ProductNo=1121630", "https://www.netzone.co.kr/shop/shopdetail.html?branduid=12239799"), ("IN-50U6A24P", "24포트"), "rack"),
     RecipePart("panel:24-rack", "24포트 패치판넬(CAT.6A, 랙형)", ("https://www.compuzone.co.kr/product/product_detail.htm?ProductNo=1121630", "https://www.netzone.co.kr/shop/shopdetail.html?branduid=12239799"), ("IN-50U6A24P", "24포트"), "rack"),
     RecipePart("panel:24-enclosure", "24포트 패치판넬(CAT.6, 함체형)", ("https://www.compuzone.co.kr/product/product_detail.htm?ProductNo=1174437", "https://www.devicemart.co.kr/goods/view?no=15542398"), ("SAFE-6patch-24P-BOX",), "enclosure"),
-    RecipePart("rack:1200", "허브랙 22U", (), ("LD-SGDR750", "H1200"), sources_pending=True),
-    RecipePart("rack:1400", "허브랙 27U", (), ("LD-SGDR750", "H1400"), sources_pending=True),
-    RecipePart("rack:1600", "허브랙 31U", (), ("LD-SGDR750", "H1600"), sources_pending=True),
+    RecipePart("rack:1200", "허브랙 22U", ("https://fibermart.co.kr/product/detail.html?product_no=11644",), ("LD-SGDR750", "H1200")),
+    RecipePart("rack:1400", "서버랙 27U", ("https://fibermart.co.kr/product/detail.html?product_no=15587",), ("SAFE-1400S", "27U")),
+    RecipePart("rack:1600", "통신랙 31U", ("https://fibermart.co.kr/product/detail.html?product_no=10362",), ("SGDR-750", "H1600")),
     RecipePart("rack:1800", "허브랙", ("https://fibermart.co.kr/product/detail.html?product_no=19212",), ("LD-H1800-NEW",)),
-    RecipePart("rack:2000", "통신랙 40U", ("https://www.compuzone.co.kr/product/product_detail.htm?ProductNo=1257242",), ("MEQ-2075A", "H2000")),
+    RecipePart("rack:2000", "통신랙 40U", ("https://fibermart.co.kr/product/detail.html?product_no=10364",), ("SGDR-750", "H2000")),
 )
 
 DEFAULT_RECIPE_ADDERS: tuple["RecipeAdder", ...] = (  # noqa: UP037
