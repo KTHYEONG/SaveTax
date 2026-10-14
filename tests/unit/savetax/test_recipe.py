@@ -461,9 +461,10 @@ def test_quote_names_the_procurement_item_and_the_equivalence() -> None:
     bundle = build_recipe_bundle("I1", _detail((_fact("f1", "5000"),)), _recipe(), (_priced(),), _Ds(), ev, today=_TODAY)  # type: ignore[arg-type]
     assert bundle is not None
     for cited in bundle.lines[0].price_evidence:
-        assert cited.quote.startswith("[제출자 설명(화면 문구 아님): 조달 물품 「")
-        assert "I1" in cited.quote
-        assert "동급 대체품" in cited.quote
+        assert "물품식별번호" not in cited.quote
+        assert cited.note is not None
+        assert "I1" in cited.note
+        assert "동급 대체품" in cited.note
         assert len(cited.quote) <= 2000
 
 
@@ -480,7 +481,10 @@ def test_exact_sum_benchmark_uses_observed_sum() -> None:
     assert bundle is not None
     assert bundle.lines[0].benchmark_unit_price_krw == Decimal(910)
     assert "판매가 합계 910원" in bundle.claim
-    assert "910원(= 완제품 900원 + 키보드 10원)" in bundle.lines[0].price_evidence[0].quote
+    note = bundle.lines[0].price_evidence[0].note
+    assert note is not None
+    assert "910원(= 완제품 900원 + 키보드 10원)" in note
+    assert bundle.lines[0].price_evidence[0].quote == "인용 " + "x" * 10
 
 
 def test_exact_sum_second_lowest_is_unstable() -> None:

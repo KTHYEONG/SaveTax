@@ -147,6 +147,7 @@ def adder_page_amount(page_text: str, amount_krw: int) -> str | None:
 
 _ADDER_STANDARD_MARK = "표준품셈"
 _ADDER_PHRASE_LIMIT = 300
+_NOTE_LIMIT = 500
 
 
 def _amount_phrase(norm: str, start: int, end: int) -> str:
@@ -436,38 +437,27 @@ def build_recipe_bundle(
     else:
         benchmark = recipe_benchmark(priced, recipe.adders, recipe.floor_krw)
     procured = detail.name or item_id
-    # The server lint judges each cited page against the declared product and B. Measured pass rates: sum written
-    # out in the quote 25/36, sum left out 0/11 (parts were then read as unrelated products).
     if sourced:
         expression = _sourced_sum_expression(priced, recipe.adders)
     else:
         expression = _sum_expression(priced) if recipe.exact_sum else ""
-    # Organizer docs ask quotes to carry only visible page text; the lint still needs the equivalence and the sum,
-    # so that explanation is labelled as the submitter's note and kept apart from the transcribed page text.
-    lead = (
-        f"[제출자 설명(화면 문구 아님): 조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 "
-        f"동급 대체품의 가격 근거. 비교 단가 {benchmark:,}원{expression}의 구성 요소 "
+    # Organizer rules: a quote carries only what the page shows. The equivalence and the sum are the submitter's
+    # reasoning, so they go to the evidence note (read by reviewers, not by the automatic check), never the quote.
+    rationale = (
+        f"조달 물품 「{procured}」(물품식별번호 {item_id})와 같은 모델이 아닌 동급 대체품 근거. "
+        f"비교 단가 {benchmark:,}원{expression}의 구성 요소"
     )
 
-    def part_header(p: PricedPart) -> str:
-        return f"{lead}가격. 이 근거는 동급 사양 비교의 {p.part.label}] [이하 판매 화면에서 옮긴 내용] "
+    def noted(e: PriceEvidence, role: str) -> PriceEvidence:
+        return replace(e, note=f"{role}. {rationale}"[:_NOTE_LIMIT])
 
-    def adder_header(adder: RecipeAdder) -> str:
-        return (
-            f"{lead}금액. 이 근거는 {adder.label}이며, 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임] "
-            "[이하 주최 측 상세분석 화면에서 옮긴 내용] "
-        )
-
-    if recipe.exact_sum:
-        evidences = tuple(replace(p.evidence, quote=(part_header(p) + p.evidence.quote)[:2000]) for p in priced)
-    else:
-        part_evidences = tuple(replace(p.evidence, quote=(part_header(p) + p.evidence.quote)[:2000]) for p in priced)
-        sourced_adders = [a for a in recipe.adders if a.source_url is not None]
-        adder_evidences = tuple(
-            replace(e, quote=(adder_header(a) + e.quote)[:2000])
-            for a, e in zip(sourced_adders, adder_evidence, strict=False)
-        )
-        evidences = part_evidences + adder_evidences
+    part_evidences = tuple(noted(p.evidence, f"동급 사양 비교의 {p.part.label} 판매가") for p in priced)
+    sourced_adders = [a for a in recipe.adders if a.source_url is not None]
+    adder_evidences = tuple(
+        noted(e, f"{a.label}: 판매가가 아니라 주최 측이 공개한 정보통신 표준품셈 기준 공임")
+        for a, e in zip(sourced_adders, adder_evidence, strict=False)
+    )
+    evidences = part_evidences + adder_evidences
     lines: list[LineProposal] = []
     rejected: list[RejectedFact] = []
     gate_base = benchmark if recipe.floor_krw is None else max(benchmark, recipe.floor_krw)

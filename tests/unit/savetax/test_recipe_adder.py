@@ -198,19 +198,20 @@ def test_floor_acts_as_gate_only() -> None:
     assert bundle.lines[0].benchmark_unit_price_krw == Decimal(767)
 
 
-def test_sum_written_in_quote() -> None:
+def test_sum_written_in_note_not_quote() -> None:
     priced, recipe, cited = _sourced_bundle()
     bundle = build_recipe_bundle("I1", _detail((_fact("f1", "2000"),)), recipe, priced, _Ds(), _evidence(), today=_TODAY, adder_evidence=cited)  # type: ignore[arg-type]
     assert bundle is not None
-    for cited_ev in bundle.lines[0].price_evidence:
-        assert "767원(= " in cited_ev.quote
-        assert "CPU" in cited_ev.quote
-        assert "랙 설치 공임" in cited_ev.quote
-    part_quote, adder_quote = (e.quote for e in bundle.lines[0].price_evidence)
-    assert part_quote.startswith("[제출자 설명(화면 문구 아님): ")
-    assert "[이하 판매 화면에서 옮긴 내용]" in part_quote
-    assert "판매 화면" not in adder_quote
-    assert "주최 측 상세분석 화면" in adder_quote
+    part, adder = bundle.lines[0].price_evidence
+    assert part.quote == priced[0].evidence.quote
+    assert adder.quote == cited[0].quote
+    for cited_ev in (part, adder):
+        assert cited_ev.note is not None
+        assert "767원(= " in cited_ev.note
+        assert "CPU" in cited_ev.note
+        assert "랙 설치 공임" in cited_ev.note
+    assert adder.note is not None
+    assert "표준품셈" in adder.note
 
 
 def test_claim_omits_floor_raise() -> None:
