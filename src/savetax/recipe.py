@@ -509,6 +509,22 @@ def _notes(recipe: Recipe, evidence: EvidenceConfig, today: date) -> str:
         diffs.pop()
 
 
+def _second_seller_note(priced: Sequence[PricedPart], adders: Sequence["RecipeAdder"], second_benchmark: int) -> str:  # noqa: UP037
+    """Disclose each part's second-seller page so reviewers can recheck the 1.2-1.3x band gate."""
+    parts = [
+        f"{p.part.label} {int(p.second_unit_price_krw or 0):,}원{f' × {p.quantity}' if p.quantity != 1 else ''}"  # noqa: RUF001
+        f"({p.second_evidence.source_url if p.second_evidence else ''})"
+        for p in priced
+    ]
+    parts += [f"{a.label} {a.amount_krw:,}원" for a in adders]
+    summed = sum(int(p.second_unit_price_krw or 0) * p.quantity for p in priced) + sum(a.amount_krw for a in adders)
+    floor = "" if summed == second_benchmark else f", 하한 적용 {second_benchmark:,}원"
+    return (
+        f" [두 번째 판매처] {' + '.join(parts)} = {summed:,}원{floor}."
+        " 납품요구 단가가 가장 싼 판매처 기준 1.3배 미만인 납품요구는 이 값의 1.2배 이상인 것만 넣었다."
+    )
+
+
 def _fully_sourced(recipe: Recipe, adder_evidence: Sequence[PriceEvidence]) -> bool:
     if recipe.exact_sum or not recipe.adders:
         return False
@@ -751,13 +767,18 @@ def build_recipe_bundle(
         )
     if len(claim) > 2000:
         raise DomainValidationError("[DATA] recipe claim exceeds text limit")
+    notes = _notes(recipe, evidence, today)
+    if second_benchmark is not None:
+        notes += _second_seller_note(priced, recipe.adders, second_benchmark)
+        if len(notes) > 4000:
+            raise DomainValidationError("[DATA] recipe notes exceed text limit")
     bundle = EvidenceBundle(
         item_id=item_id,
         lane=Lane.RECIPE,
         title=f"{recipe.title_phrase} 대비 {best:.2f}배(동일 모델 아님)",
         claim=claim,
         comparison_scope=_scope(recipe, evidence),
-        reproduction_notes=_notes(recipe, evidence, today),
+        reproduction_notes=notes,
         lines=tuple(lines),
         rejected=tuple(rejected),
         caveats=(),

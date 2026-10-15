@@ -163,3 +163,29 @@ def test_two_memory_sticks_count_twice_in_sourced_benchmark() -> None:
     note = bundle.lines[0].price_evidence[0].note
     assert note is not None
     assert "메모리 16GB 100원 × 2" in note  # noqa: RUF001
+
+
+def test_band_lines_disclose_second_seller_pages() -> None:
+    base = _priced()
+    second_url = "https://cynexpc.com/shop/product_detail.html?pd_no=1"
+    part = RecipePart("cpu:T", "CPU", (base.evidence.source_url, second_url), ("CPU",))
+    second = replace(base.evidence, source_url=second_url, observed_price_krw=104)
+    priced = replace(base, part=part, second_unit_price_krw=104, second_evidence=second)
+    facts = (_fact("f1", "125"), _fact("f2", "124", request_no="R2", line_no="2"))
+    bundle = build_recipe_bundle("I1", _detail(facts), _seller_recipe(part), (priced,), _Ds(), EvidenceConfig(min_item_expected_krw=0), today=date.today())  # type: ignore[arg-type]
+    assert bundle is not None
+    assert [line.fact_id for line in bundle.lines] == ["f1"]
+    assert f"[두 번째 판매처] CPU 104원({second_url}) = 104원." in bundle.reproduction_notes
+
+
+def test_second_seller_note_over_limit_is_rejected() -> None:
+    base = _priced()
+    parts = []
+    for i in range(3):
+        url = f"https://cynexpc.com/shop/product_detail.html?pd_no={i}&x=" + "a" * 1900
+        part = RecipePart(f"k{i}", f"부품{i}", (base.evidence.source_url, url), ("CPU",))
+        second = replace(base.evidence, source_url=url, observed_price_krw=104)
+        parts.append(replace(base, part=part, second_unit_price_krw=104, second_evidence=second))
+    recipe = Recipe("desktop", tuple((p.part, 1) for p in parts), (), (), (), False, (), "CPU")
+    with pytest.raises(DomainValidationError, match="notes exceed"):
+        build_recipe_bundle("I1", _detail((_fact("f1", "375"),)), recipe, tuple(parts), _Ds(), EvidenceConfig(min_item_expected_krw=0), today=date.today())  # type: ignore[arg-type]
