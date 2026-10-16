@@ -32,6 +32,7 @@ class ItemState(enum.StrEnum):
     CLAIMED = "claimed"
     CLAIMED_BY_ME = "claimed_by_me"
     REFORM_FOUND = "reform_found"
+    ON_HOLD = "on_hold"
     NOT_FOUND = "not_found"
 
 

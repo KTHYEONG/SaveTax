@@ -30,6 +30,7 @@ _NON_RETRYABLE = frozenset(
     {
         "REFORM_ALREADY_FOUND",
         "PRODUCT_ALREADY_CLAIMED",
+        "ITEM_ON_HOLD",
         "PARTICIPANT_LIMIT",
         "REVISION_LIMIT",
         "REVISION_CONFLICT",

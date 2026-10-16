@@ -160,6 +160,13 @@ def test_lookup_with_missing_id_fails_closed() -> None:
         client.lookup_items(["a", "b"])
 
 
+def test_lookup_parses_on_hold_state() -> None:
+    script = [_resp(200, {"items": [{"input": "a", "kind": "item", "item_id": "a", "state": "on_hold",
+                                     "hold_until": "2026-10-17T00:00:00Z"}]})]
+    client, _, _ = _client(script)
+    assert [r.state for r in client.lookup_items(["a"])] == [ItemState.ON_HOLD]
+
+
 def test_unknown_state_fails_closed() -> None:
     script = [_resp(200, {"items": [{"input": "a", "kind": "item", "item_id": "a", "state": "frozen"}]})]
     client, _, _ = _client(script)
