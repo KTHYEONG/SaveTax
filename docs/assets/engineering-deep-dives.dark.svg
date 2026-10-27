@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 840" width="1200" height="840" role="img" style="font-family:Pretendard, 'Malgun Gothic', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title>SaveTax 3대 핵심 문제 해결 사례 (Engineering Deep Dives)</title>
+  <desc>다중 등재 납품요구 23.87% 과대계상 및 옵션·계열 오비교 차단, 조달 전용(OEM) 품목 시중가 부재 및 쇼핑몰 파싱·단가 밴드 왜곡 해결, 비동기 제출 파이프라인 중복 청구 및 자격증명 보안 격리</desc>
+  <defs>
+    <filter id="card-shadow" x="-6%" y="-6%" width="112%" height="116%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.06" data-paint-static="true"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="840" fill="#16191E" data-fill-role="canvas"/>
+
+  <!-- Header -->
+  <g>
+    <rect x="48" y="40" width="6" height="46" rx="3" fill="#6FA3D3" data-fill-role="focus"/>
+    <text x="68" y="32" font-size="13.5" font-weight="700" letter-spacing="0.06em" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">ENGINEERING DEEP DIVES · TROUBLESHOOTING &amp; INVARIANTS</text>
+    <text x="68" y="64" font-size="26" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">데이터 왜곡·시중가 부재·중복 청구 위험을 해결한 3대 공학적 트러블슈팅</text>
+    <text x="68" y="96" font-size="15" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">[문제 상황] → [① 탐지 · ② 조치 · ③ 무결성 검증] → [검증된 성과] 3단계 아키텍처 해법</text>
+  </g>
+
+  <!-- ==================== CASE 01 ROW ==================== -->
+  <g>
+    <rect x="48" y="124" width="1104" height="218" rx="16" fill="#20242B" stroke="#6FA3D3" stroke-width="1.5" data-fill-role="surface" data-stroke-role="edge-line" filter="url(#card-shadow)"/>
+    <rect x="68" y="140" width="184" height="24" rx="12" fill="#2A3746" data-fill-role="edge-fill"/>
+    <text x="160" y="152" font-size="11.5" font-weight="700" letter-spacing="0.05em" fill="#C5DAED" data-fill-role="edge-ink" text-anchor="middle" dominant-baseline="central">CASE 01 · DATA INTEGRITY</text>
+    <text x="266" y="152" font-size="16" font-weight="700" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">다중 등재 납품요구 중복 합산(23.87% 과대계상) 및 숨은 옵션·계열 오비교 차단</text>
+
+    <!-- Left: Problem -->
+    <rect x="68" y="176" width="286" height="148" rx="12" fill="#31353B" stroke="#9EA6B0" stroke-width="1" data-fill-role="data-fill" data-stroke-role="data-line"/>
+    <text x="84" y="198" font-size="14.5" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">문제 상황 (장애 및 한계)</text>
+    <text x="84" y="226" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">· 동일 dlv_key 다중 등재로 단순 합산 시</text>
+    <text x="84" y="248" font-size="13.5" font-weight="700" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">  주문 총액 21.76조(+4.19조) 왜곡</text>
+    <text x="84" y="274" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">· 동일 품목 내 저가 옵션·일반형 모델을</text>
+    <text x="84" y="296" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">  내진형 납품건 기준가로 오비교 위험</text>
+
+    <!-- Arrow Left -> Center -->
+    <path d="M360 244 L370 250 L360 256" fill="none" stroke="#6FA3D3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="edge-line"/>
+
+    <!-- Center: 3-Step Solution -->
+    <rect x="376" y="176" width="468" height="148" rx="12" fill="#2A3746" stroke="#6FA3D3" stroke-width="1" data-fill-role="edge-fill" data-stroke-role="edge-line"/>
+    <text x="392" y="198" font-size="14.5" font-weight="700" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">3단계 공학적 해결 (dataset · variants · series · priceproof)</text>
+    <text x="392" y="226" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">① 탐지: dlv_key별 품목·계약·금액 불변식 전수 검사 후 중복 제거</text>
+    <text x="392" y="256" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">② 조치: 다중단가 최고가 게이트 및 17개 순번 블록 계열 분리</text>
+    <text x="392" y="286" font-size="13.5" font-weight="600" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">③ 검증: 변경계약일·이전 납품 이력으로 납품시점 단가 유효성 입증</text>
+
+    <!-- Arrow Center -> Right -->
+    <path d="M850 244 L860 250 L850 256" fill="none" stroke="#6FA3D3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="edge-line"/>
+
+    <!-- Right: Verified Outcome -->
+    <rect x="866" y="176" width="266" height="148" rx="12" fill="#2A3746" stroke="#6FA3D3" stroke-width="1.5" data-fill-role="edge-fill" data-stroke-role="edge-line"/>
+    <text x="884" y="198" font-size="13" font-weight="700" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">VERIFIED OUTCOME</text>
+    <text x="884" y="238" font-size="34" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">0.00% 왜곡</text>
+    <text x="884" y="276" font-size="14.5" font-weight="700" fill="#C5DAED" data-fill-role="edge-ink" dominant-baseline="central">17.57조 원 실측 모수 확정</text>
+    <text x="884" y="300" font-size="13" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">300,431건 고유 납품키 정규화</text>
+  </g>
+
+  <!-- ==================== CASE 02 ROW ==================== -->
+  <g>
+    <rect x="48" y="362" width="1104" height="218" rx="16" fill="#20242B" stroke="#5FAE8F" stroke-width="1.5" data-fill-role="surface" data-stroke-role="compute-line" filter="url(#card-shadow)"/>
+    <rect x="68" y="378" width="192" height="24" rx="12" fill="#263A37" data-fill-role="compute-fill"/>
+    <text x="164" y="390" font-size="11.5" font-weight="700" letter-spacing="0.05em" fill="#BFDFD2" data-fill-role="compute-ink" text-anchor="middle" dominant-baseline="central">CASE 02 · RECIPE &amp; PARSER</text>
+    <text x="274" y="390" font-size="16" font-weight="700" fill="#BFDFD2" data-fill-role="compute-ink" dominant-baseline="central">조달 전용(OEM) 품목의 시중가 부재 및 이기종 쇼핑몰 파싱·단가 밴드 왜곡 해결</text>
+
+    <!-- Left: Problem -->
+    <rect x="68" y="414" width="286" height="148" rx="12" fill="#31353B" stroke="#9EA6B0" stroke-width="1" data-fill-role="data-fill" data-stroke-role="data-line"/>
+    <text x="84" y="436" font-size="14.5" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">문제 상황 (장애 및 한계)</text>
+    <text x="84" y="464" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">· 데스크톱·패치판넬·랙 등 조달 전용</text>
+    <text x="84" y="486" font-size="13.5" font-weight="700" fill="#BFDFD2" data-fill-role="compute-ink" dominant-baseline="central">  모델은 동일 시판 상품 페이지 부재</text>
+    <text x="84" y="512" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">· 쇼핑몰별 인코딩·숨김 디코이 가격·</text>
+    <text x="84" y="534" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">  품절 문구 혼재로 lint suspect 발생</text>
+
+    <!-- Arrow Left -> Center -->
+    <path d="M360 482 L370 488 L360 494" fill="none" stroke="#5FAE8F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="compute-line"/>
+
+    <!-- Center: 3-Step Solution -->
+    <rect x="376" y="414" width="468" height="148" rx="12" fill="#263A37" stroke="#5FAE8F" stroke-width="1" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+    <text x="392" y="436" font-size="14.5" font-weight="700" fill="#BFDFD2" data-fill-role="compute-ink" dominant-baseline="central">3단계 공학적 해결 (recipe · desktoprecipe · shops.py)</text>
+    <text x="392" y="464" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">① 탐지: 품목 속성 정규화 후 동급 부품 조합·표준품셈 공임 매핑</text>
+    <text x="392" y="494" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">② 조치: CP949 폴백 · 숨김 태그 제거 · 1,500자 품절 윈도우 분리</text>
+    <text x="392" y="524" font-size="13.5" font-weight="600" fill="#BFDFD2" data-fill-role="compute-ink" dominant-baseline="central">③ 검증: 2개 판매처 교차수집 및 1.2~1.3배 경계 이중 밴드 게이트</text>
+
+    <!-- Arrow Center -> Right -->
+    <path d="M850 482 L860 488 L850 494" fill="none" stroke="#5FAE8F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="compute-line"/>
+
+    <!-- Right: Verified Outcome -->
+    <rect x="866" y="414" width="266" height="148" rx="12" fill="#263A37" stroke="#5FAE8F" stroke-width="1.5" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+    <text x="884" y="436" font-size="13" font-weight="700" fill="#BFDFD2" data-fill-role="compute-ink" dominant-baseline="central">VERIFIED OUTCOME</text>
+    <text x="884" y="476" font-size="34" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">29개 판매처</text>
+    <text x="884" y="514" font-size="14.5" font-weight="700" fill="#BFDFD2" data-fill-role="compute-ink" dominant-baseline="central">32종 부품 · 5종 공임 자동화</text>
+    <text x="884" y="538" font-size="13" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">2순위 판매처 이중 밴드 검증</text>
+  </g>
+
+  <!-- ==================== CASE 03 ROW ==================== -->
+  <g>
+    <rect x="48" y="600" width="1104" height="218" rx="16" fill="#20242B" stroke="#9490C6" stroke-width="1.5" data-fill-role="surface" data-stroke-role="api-line" filter="url(#card-shadow)"/>
+    <rect x="68" y="616" width="214" height="24" rx="12" fill="#323343" data-fill-role="api-fill"/>
+    <text x="175" y="628" font-size="11.5" font-weight="700" letter-spacing="0.05em" fill="#D4D3E8" data-fill-role="api-ink" text-anchor="middle" dominant-baseline="central">CASE 03 · LEDGER &amp; SECURITY</text>
+    <text x="296" y="628" font-size="16" font-weight="700" fill="#D4D3E8" data-fill-role="api-ink" dominant-baseline="central">비동기 제출 파이프라인의 중복 청구 위험 및 네트워크·자격증명 보안 격리</text>
+
+    <!-- Left: Problem -->
+    <rect x="68" y="652" width="286" height="148" rx="12" fill="#31353B" stroke="#9EA6B0" stroke-width="1" data-fill-role="data-fill" data-stroke-role="data-line"/>
+    <text x="84" y="674" font-size="14.5" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">문제 상황 (장애 및 한계)</text>
+    <text x="84" y="702" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">· 타임아웃·프로세스 중단 후 재시도 시</text>
+    <text x="84" y="724" font-size="13.5" font-weight="700" fill="#D4D3E8" data-fill-role="api-ink" dominant-baseline="central">  일일 청구 한도(Quota) 중복 차감 위험</text>
+    <text x="84" y="750" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">· 샌드박스 차단과 서버 장애 혼동 및</text>
+    <text x="84" y="772" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">  리다이렉트·예외 로그 내 PAT 노출 위험</text>
+
+    <!-- Arrow Left -> Center -->
+    <path d="M360 720 L370 726 L360 732" fill="none" stroke="#9490C6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="api-line"/>
+
+    <!-- Center: 3-Step Solution -->
+    <rect x="376" y="652" width="468" height="148" rx="12" fill="#323343" stroke="#9490C6" stroke-width="1" data-fill-role="api-fill" data-stroke-role="api-line"/>
+    <text x="392" y="674" font-size="14.5" font-weight="700" fill="#D4D3E8" data-fill-role="api-ink" dominant-baseline="central">3단계 공학적 해결 (http · ledger · submissions · redaction)</text>
+    <text x="392" y="702" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">① 탐지: DNS·TLS·샌드박스 3단계 분류 및 리다이렉트 원천 차단</text>
+    <text x="392" y="732" font-size="13.5" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">② 조치: 0600 flock+fsync 선기록 원장 및 Idempotency-Key 복구</text>
+    <text x="392" y="762" font-size="13.5" font-weight="600" fill="#D4D3E8" data-fill-role="api-ink" dominant-baseline="central">③ 검증: 실시간 Preflight 재조회 및 연속 suspect 서킷 브레이커</text>
+
+    <!-- Arrow Center -> Right -->
+    <path d="M850 720 L860 726 L850 732" fill="none" stroke="#9490C6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="api-line"/>
+
+    <!-- Right: Verified Outcome -->
+    <rect x="866" y="652" width="266" height="148" rx="12" fill="#323343" stroke="#9490C6" stroke-width="1.5" data-fill-role="api-fill" data-stroke-role="api-line"/>
+    <text x="884" y="674" font-size="13" font-weight="700" fill="#D4D3E8" data-fill-role="api-ink" dominant-baseline="central">VERIFIED OUTCOME</text>
+    <text x="884" y="714" font-size="34" font-weight="700" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">중복·유출 0건</text>
+    <text x="884" y="752" font-size="14.5" font-weight="700" fill="#D4D3E8" data-fill-role="api-ink" dominant-baseline="central">100% 멱등 복구 &amp; PAT 격리</text>
+    <text x="884" y="776" font-size="13" font-weight="600" fill="#E9ECEF" data-fill-role="ink" dominant-baseline="central">3개 공식 호스트 외 전송 원천 차단</text>
+  </g>
+</svg>
