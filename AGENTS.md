@@ -16,7 +16,7 @@
 
 ## 2. Autonomy & Diagnostic Contract
 - **Bias Toward Action:** Autonomously run exploratory queries, DuckDB data batch probes, and candidate validations under `scratch/`.
-- **Skills as Modular Utilities:** Skills (`probe`, `spec`, `implement`, `check`, `refactor`, `commit`) are independent utilities. Specs reside under `docs/specs/` (gitignored).
+- **Skills:** user-level and project-agnostic (`probe`, `spec`, `implement`, `check`, `refactor`, `commit`, `ship`); this project's policy is the Workflow Profile in §6. Individual slash invocations execute only that skill and halt for user review; `/ship` is the explicit autonomy opt-in for the approved implement → check → commit chain. Specs live under `docs/specs/` (gitignored).
 
 ## 3. Project Toolchain & Verification
 - **Quality Gate:** `uv run python tools/verify.py`
@@ -34,3 +34,15 @@
 - **Documentation & Comments:** [documentation.md](.agents/rules/documentation.md) — *Contract docstrings, evidence rationale, and Technical English.*
 - **Performance & Optimization:** [performance.md](.agents/rules/performance.md) — *DuckDB full-dataset scanning, memory discipline, and ZIP batch processing.*
 - **Logging & Diagnostics:** [logging.md](.agents/rules/logging.md) — *Audit taxonomy, network diagnostic stages, and credential redaction.*
+
+## 6. Workflow Profile
+- verify: `uv run python tools/verify.py`
+- test_scoped: `uv run pytest {files}`
+- spec_dir: `docs/specs` (untracked; archive finished specs to `docs/specs/_done/`)
+- scratch_dir: `scratch/` (never commit)
+- high_risk_paths: `src/savetax/**`
+- hard_stops: any transmission or logging of the participant PAT outside the allowlisted hosts (never via URL query, CLI logs, repo files); score submission, modification, or withdrawal without explicit user approval; re-submitting rejected reports without confirmation; fabricating or embellishing candidates; browser automation or generic web search for catalog discovery. Regular reports may be submitted autonomously per §1; any `rm` without previewing exact targets
+- commit_style: Korean `<type>: <summary <=50 chars>` + `- **Why:** <rationale>`; types feat/fix/refactor/chore/docs; no AI or co-author trailers; every commit via `/commit`
+- artifact_language: English
+- report_language: Korean (card keys stay English)
+- rules: `.agents/rules/*.md`
