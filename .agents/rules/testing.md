@@ -7,7 +7,6 @@
 - **Pragmatic Invariant Verification (Zero Ceremony):**
   - *Direct Execution (Bug fixes, anomaly heuristics, probe scripts):* Implement directly with targeted invariant guard tests and verify via `tools/verify.py`.
   - *Contract Design (Complex data pipelines, API clients, DuckDB parsers):* Formulate explicit interface contracts and invariant scenarios before implementation.
-  - *On-Demand Utilities:* Skills (`probe`, `spec`, `implement`, `check`) are independent tools, not a mandatory sequential conveyor belt.
 - **Observable Behavior & Invariants:** Verify return contracts, price delta calculations, data deduplication, and error conditions rather than private implementation details.
 - **In-Memory & Synthetic Data:** Use minimal deterministic synthetic procurement and market records (small JSON/Parquet fixtures) in unit tests; never download the real full ZIP dataset in unit test runs.
 
