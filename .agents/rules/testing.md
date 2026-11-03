@@ -1,3 +1,8 @@
+---
+paths:
+  - "tests/**"
+  - "tools/**"
+---
 # Testing Directives & Quality Standards: SaveTax Hackathon
 
 > **Verify observable audit behaviors and data contracts, not internal implementation details. Maintain fast feedback loops with small deterministic synthetic procurement catalogs. Enforce invariant verification on price anomaly detection, isolate failures with pinpoint precision, and guarantee 100% diff-coverage.**

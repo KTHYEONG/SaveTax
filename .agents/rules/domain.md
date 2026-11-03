@@ -1,3 +1,10 @@
+---
+paths:
+  - "src/**"
+  - "tests/**"
+  - "tools/**"
+  - "docs/specs/**"
+---
 # Domain & System Core Directives: SaveTax Hackathon
 
 > **The primary directive is engineering an objective, deterministic, and evidence-backed public procurement audit engine to detect inflated government spending (세금도둑 적발). Maintain strict mathematical invariants on price delta computations, absolute protection of participant credentials, and rigorous truth preservation.**

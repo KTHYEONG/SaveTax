@@ -1,3 +1,7 @@
+---
+paths:
+  - "src/**"
+---
 # Performance & Optimization Directives: SaveTax Hackathon
 
 > **Performance is an architectural invariant, not an afterthought. Never fake speed by silently omitting candidate batches, truncating catalog searches, or skipping evidence validation. Correctness strictly precedes speed. Maximize throughput across dataset exploration and candidate auditing within physical boundaries.**

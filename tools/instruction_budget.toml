@@ -1,0 +1,305 @@
+agents_file = "AGENTS.md"
+rules_dir = ".agents/rules"
+agents_max_lines = 100
+always_loaded_max_bytes = 6000
+scoped_rules_max_bytes = 22000
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Objective & Integrity"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Absolute Credential Protection (PAT Invariant)"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "REST & Dataset Driven Discovery"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Network Diagnostic Rigor"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Submission Autonomy Contract"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Regular Reports (일반 제보)"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Score Submission & Modification (점수 제출/수정/철회)"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Session-Based Guidance Polling"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Bias Toward Action"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Skills"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Quality Gate"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Test Runner"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Git Commits"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Natural Korean"
+
+[[retention]]
+file = "AGENTS.md"
+phrase = "Technical English"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Layout & Scope Hygiene"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Contract & Spec Reconciliation"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Strong Typing at Boundaries"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Explicit Configuration"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Toolchain Alignment"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Network Client Robustness"
+
+[[retention]]
+file = ".agents/rules/code-style.md"
+phrase = "Fail-Closed on Corrupted Data"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "Self-Documenting Code First"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "Rationale-Only Standard"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "No Procedural Narration"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "Compact Caller Contracts"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "Contract-Driven Documentation"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "Stable Boundaries & Semantics"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "Coherent In-Place Updates"
+
+[[retention]]
+file = ".agents/rules/documentation.md"
+phrase = "All Documentation & In-line Comments"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Procurement vs. Market Price Invariants"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Zero Magic Numbers"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Absolute Truth Preservation (No Hallucination)"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Causal Data Ordering"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Official Dataset Interpretation Rules (`listings.parquet`)"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "PAT Isolation Boundary"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Prohibited Leakage Vectors"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Multi-Stage Connection Diagnostics"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Sandbox vs. Infrastructure Discrimination"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Transient Failure Handling"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Autonomous General Reports (일반 제보)"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Reviewer Feedback Feedback-Loop"
+
+[[retention]]
+file = ".agents/rules/domain.md"
+phrase = "Strict User Approval Gate (최종 점수 제출)"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Strict Credential Redaction"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Precision Preservation"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Stable Correlation Identifiers"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Fixed Domain Category Taxonomy"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Consistent Log Format"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Structured Fields"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Large Dataset Summaries"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Granular Multi-Stage Connection Logging"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Data Unavailability Protocol"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Configured Storage Paths"
+
+[[retention]]
+file = ".agents/rules/logging.md"
+phrase = "Non-Destructive Cleanup"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Bounded Resource Scaling"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Eliminate Unnecessary Duplication"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Deterministic Resource Reclamation"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Hot Path Algorithmic Efficiency"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "I/O Locality & Column Pruning"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Participant-Seeded Batching"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Early Rejection Heuristics"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Balanced Parallelism"
+
+[[retention]]
+file = ".agents/rules/performance.md"
+phrase = "Continuous Progress Telemetry"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Contracts Over Premature Tests"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Pragmatic Invariant Verification (Zero Ceremony)"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Observable Behavior & Invariants"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "In-Memory & Synthetic Data"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Tax Waste & Price Delta Invariants"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Evidence & Specification Matching Boundaries"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Network Diagnostic & Resilience Boundaries"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Hermetic Environment Invariant"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Pragmatic Fixtures & Mocking"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Process-Isolated Temp Workspaces"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Diff-Coverage & Domain Focus"
+
+[[retention]]
+file = ".agents/rules/testing.md"
+phrase = "Test Integrity"

@@ -1,3 +1,7 @@
+---
+paths:
+  - "src/**"
+---
 # Unified Logging & Diagnostic Directives: SaveTax Hackathon
 
 > **Logs must be concise, structured, and machine-parsable without sacrificing diagnostic correctness. Never log secret credentials (PAT), and strictly isolate network diagnostic stages to prevent false infrastructure alarms.**

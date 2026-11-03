@@ -22,18 +22,20 @@
 - **Quality Gate:** `uv run python tools/verify.py`
 - **Test Runner:** `uv run pytest`
 - **Git Commits:** Run the project's `commit` skill with Korean subject and 1-line rationale.
+- Instruction budget: `uv run python tools/instruction_budget.py`
+- Commit guard: git config core.hooksPath .githooks (one-time per clone). Claude Code also runs a Bash guard hook (`.claude/settings.json`); Codex/agy get only the git hook.
 
 ## 4. Communication & Language
 - **Natural Korean:** Converse, explain findings, candidate diagnoses, and reports in Korean (한국어). Inside structured output cards, retain English keys/badges while writing descriptions in Korean.
 - **Technical English:** System instructions, rules, specs, code, and docstrings are written in Technical English.
 
 ## 5. Domain Rule Routing
-- **Domain Invariants:** [domain.md](.agents/rules/domain.md) — *Procurement tax audit integrity, market price delta invariants, and PAT protection.*
-- **Testing & Quality:** [testing.md](.agents/rules/testing.md) — *Evidence verification, boundary tests, synthetic datasets, and diff-coverage.*
-- **Architecture & Standards:** [code-style.md](.agents/rules/code-style.md) — *Data pipelines, typing contracts, and toolchain alignment.*
-- **Documentation & Comments:** [documentation.md](.agents/rules/documentation.md) — *Contract docstrings, evidence rationale, and Technical English.*
-- **Performance & Optimization:** [performance.md](.agents/rules/performance.md) — *DuckDB full-dataset scanning, memory discipline, and ZIP batch processing.*
-- **Logging & Diagnostics:** [logging.md](.agents/rules/logging.md) — *Audit taxonomy, network diagnostic stages, and credential redaction.*
+- Before touching `src/**`, `tests/**`, `tools/**`, candidate evidence, or price-delta logic: read `.agents/rules/domain.md`
+- Before touching `tests/**`, test tooling, or fixtures: read `.agents/rules/testing.md`
+- Before changing module boundaries, typing contracts, or data pipelines: read `.agents/rules/code-style.md`
+- Before touching any logging call, network diagnostics, or PAT/credential handling: read `.agents/rules/logging.md`
+- Before touching DuckDB scans, ZIP batch processing, or memory-heavy paths: read `.agents/rules/performance.md`
+- Before touching docstrings, comments, or `docs/**`: read `.agents/rules/documentation.md`
 
 ## 6. Workflow Profile
 - verify: `uv run python tools/verify.py`
